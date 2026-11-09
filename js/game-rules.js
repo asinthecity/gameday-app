@@ -4,6 +4,8 @@
 // text ("2026-11-14", "08:30"). They never pass through a time zone, so a game
 // cannot slip to the day before or after, whatever the phone's zone or region.
 
+import { placeCount, startingFormation } from "./formation-rules.js";
+
 // Fixed for now (J1-S5 is on the Later list). Stored on each game, so changing
 // them later leaves old games correct.
 export const FORMATION = "3-3-2";
@@ -54,8 +56,8 @@ export function canCreateGame(form) {
 }
 
 /** A line-up with every place empty. Each call gives a separate one. */
-function emptyLineUp() {
-  return { status: NOT_PLANNED, positions: new Array(POSITION_COUNT).fill(null) };
+function emptyLineUp(places = POSITION_COUNT) {
+  return { status: NOT_PLANNED, positions: new Array(places).fill(null) };
 }
 
 /**
@@ -75,7 +77,11 @@ function emptyLineUp() {
  *
  * `squad` is the squad in alphabetical order. It fills the first half only.
  */
-export function newGame(form, id, createdOrder, squad) {
+export function newGame(form, id, createdOrder, squad, team = null) {
+  // GDA-22: the game takes the team's size, half length and starting shape, fixed for this game.
+  // With no team given (older callers and tests) it is the old 9 a side, 3-3-2, 25 minutes.
+  const halfMinutes = team?.halfMinutes ?? HALF_MINUTES;
+  const formation = team ? startingFormation(team) : FORMATION;
   const game = {
     id,
     createdOrder,
@@ -84,11 +90,11 @@ export function newGame(form, id, createdOrder, squad) {
     kickOff: form.kickOff,
     opposition: cleanText(form.opposition),
     venue: cleanText(form.venue),
-    formation: FORMATION,
-    halfMinutes: HALF_MINUTES,
-    rotationMinutes: clampRotation(form.rotationMinutes),
+    formation,
+    halfMinutes,
+    rotationMinutes: clampRotation(form.rotationMinutes, halfMinutes),
     absent: [],
-    lineups: { firstHalf: emptyLineUp(), secondHalf: emptyLineUp() },
+    lineups: { firstHalf: emptyLineUp(placeCount(formation)), secondHalf: emptyLineUp(placeCount(formation)) },
   };
   return prePlaced(game, squad);
 }
@@ -208,6 +214,9 @@ export function whereIs(game, playerId) {
  * position. This gives the player in a spot, or null if it is empty.
  */
 function playerIn(game, spot) {
+  if (spot.zone) {
+    return null; // The ABSENT or BENCH row itself (GDA-62): no player in it.
+  }
   return spot.playerId ?? activePositions(game)[spot.place] ?? null;
 }
 
@@ -241,6 +250,38 @@ export function movedOnto(game, playerId, spot) {
   }
   const moved = withFirstHalf(game, { positions });
   return { game: { ...moved, benchOrder: benchAfterMove(game.benchOrder ?? [], playerId, otherId, from, to) }, changes };
+}
+
+/**
+ * The line-up screen's move (GDA-62): like movedOnto, but ABSENT is allowed, from anywhere
+ * to anywhere, before kick-off. A spot can also be a whole row: { zone: "absent" } or
+ * { zone: "bench" }.
+ * - Onto the ABSENT row (or a player in it): marks absent. Nothing else moves.
+ * - An absent player onto the bench row or a bench player: back in, at the end of the bench.
+ * - An absent player onto an empty position: takes it. Onto a player: takes it and that
+ *   player goes to the bench (never to ABSENT, so nobody is marked absent by accident).
+ * Gives { game, changes } like movedOnto (changes is empty when only absence changed),
+ * or null if the move is not allowed. After kick-off it is exactly movedOnto.
+ */
+export function lineUpMoved(game, playerId, spot, squad) {
+  if (game.state !== NOT_STARTED) {
+    return spot.zone ? null : movedOnto(game, playerId, spot);
+  }
+  const from = whereIs(game, playerId);
+  const targetId = playerIn(game, spot);
+  const toAbsent = spot.zone === "absent" || (targetId !== null && whereIs(game, targetId) === ABSENT);
+  if (toAbsent) {
+    return from === ABSENT ? null : { game: markedAbsent(game, playerId), changes: [] };
+  }
+  if (from !== ABSENT) {
+    return spot.zone ? null : movedOnto(game, playerId, spot);
+  }
+  // An absent player coming back in: bench first (order completed so they land at the end).
+  const back = withBenchOrder(markedBackIn(game, playerId), squad);
+  if (spot.zone === "bench" || (targetId !== null && whereIs(back, targetId) === BENCH)) {
+    return { game: back, changes: [] };
+  }
+  return movedOnto(back, playerId, spot);
 }
 
 /**
@@ -280,7 +321,8 @@ export function benchReordered(game, playerId, targetId) {
 
 /** Only a player who is not absent can be dragged. An empty position cannot. */
 export function canDrag(game, spot) {
-  return spot.playerId !== undefined && whereIs(game, spot.playerId) !== ABSENT;
+  // Before kick-off an absent player can be dragged too (GDA-62).
+  return spot.playerId !== undefined && (game.state === NOT_STARTED || whereIs(game, spot.playerId) !== ABSENT);
 }
 
 /**
@@ -324,20 +366,7 @@ export function startedFirstHalf(game, at) {
   if (game.state !== NOT_STARTED) {
     return game;
   }
-  return withKeeperMark({ ...game, state: FIRST_HALF, firstHalfStartedAt: at });
-}
-
-/**
- * GDA-28: any time in goal counts as a bench turn. Gives the player now in goal the
- * turn mark (setting it again adds nothing; an empty goal marks nobody). Called
- * wherever someone can arrive in goal: kick-off, Start 2nd Half, a move, a Swap.
- */
-function withKeeperMark(game) {
-  const keeper = activePositions(game)[0];
-  if (keeper === null || keeper === undefined || game.hadTurn?.[keeper]) {
-    return game;
-  }
-  return { ...game, hadTurn: { ...game.hadTurn, [keeper]: true } };
+  return { ...game, state: FIRST_HALF, firstHalfStartedAt: at };
 }
 
 /** The event log entry for a half starting, at the real time `at`. */
@@ -365,11 +394,11 @@ export function anyInProgress(games) {
  * back cannot make it negative. The clock keeps running past the half length and
  * then shows the time over, "+0:01" (GDA-36); at exactly 25:00 it shows "25:00".
  */
-export function clockText(startedAt, now) {
+export function clockText(startedAt, now, halfMinutes = HALF_MINUTES) {
   const elapsed = Math.floor((now - startedAt) / 1000);
   const seconds = Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
   const text = (total) => `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
-  const half = HALF_MINUTES * 60;
+  const half = halfMinutes * 60;
   return seconds > half ? "+" + text(seconds - half) : text(seconds);
 }
 
@@ -377,32 +406,44 @@ export function clockText(startedAt, now) {
  * Has the clock reached the half length? Worked out from the same saved start time
  * as the clock, so a locked phone cannot miss it. Drives the TIME strip.
  */
-export function isTimeUp(startedAt, now) {
+export function isTimeUp(startedAt, now, halfMinutes = HALF_MINUTES) {
   const elapsed = Math.floor((now - startedAt) / 1000);
-  return Number.isFinite(elapsed) && elapsed >= HALF_MINUTES * 60;
+  return Number.isFinite(elapsed) && elapsed >= halfMinutes * 60;
 }
 
 /** A new game starts with this rotation length, and so does a game saved before GDA-32. */
 export const ROTATION_MINUTES = 6;
 export const MIN_ROTATION = 1;
-export const MAX_ROTATION = 25;
+export const MAX_ROTATION = 25; // The most a half can be, and so the most any rotation can be.
 
 /** A whole number of minutes from 1 to 25. Anything else becomes the default 6. */
-export function clampRotation(minutes) {
+export function clampRotation(minutes, halfMinutes = MAX_ROTATION) {
+  // GDA-22: never longer than the game's half. The default 6 is also held to it.
+  const top = Math.max(MIN_ROTATION, Math.min(MAX_ROTATION, halfMinutes));
   if (!Number.isFinite(minutes)) {
-    return ROTATION_MINUTES;
+    return Math.min(ROTATION_MINUTES, top);
   }
-  return Math.min(MAX_ROTATION, Math.max(MIN_ROTATION, Math.round(minutes)));
+  return Math.min(top, Math.max(MIN_ROTATION, Math.round(minutes)));
 }
 
 /** The game's rotation length in minutes; 6 for games saved without one. */
 export function rotationOf(game) {
-  return clampRotation(game?.rotationMinutes ?? ROTATION_MINUTES);
+  return clampRotation(game?.rotationMinutes ?? ROTATION_MINUTES, halfOf(game));
+}
+
+/** The game's own half length in minutes (25 for games saved without one). */
+export function halfOf(game) {
+  return game?.halfMinutes ?? HALF_MINUTES;
+}
+
+/** Copies a game with a different formation. Only the grouping changes: the same places, so nobody moves. */
+export function withFormation(game, formation) {
+  return { ...game, formation };
 }
 
 /** Copies a game with a new rotation length. Timers are not touched: they are measured against it from now on. */
 export function withRotation(game, minutes) {
-  return { ...game, rotationMinutes: clampRotation(minutes) };
+  return { ...game, rotationMinutes: clampRotation(minutes, halfOf(game)) };
 }
 
 /**
@@ -507,14 +548,14 @@ export function reopenedFirstHalf(game) {
     ...rest,
     firstHalfEndedAt: null,
     benchOrder: benchOrderAtEndHalf ?? game.benchOrder,
-    lineups: { ...game.lineups, secondHalf: emptyLineUp() },
+    lineups: { ...game.lineups, secondHalf: emptyLineUp(game.lineups?.firstHalf?.positions?.length) },
   };
 }
 
 /**
  * Start 2nd Half (GDA-31): the second half's clock starts at once from `at`. Bench
  * timers start again from 0:00 for everyone on the bench (benchSince is cleared, so
- * they fall back to the half's start). Turn marks (hadTurn) are left alone. Gives the
+ * they fall back to the half's start). Bench numbers (benchNumbers) are left alone. Gives the
  * game back unchanged if it is not at Half Time, so a double tap starts it once.
  */
 export function startedSecondHalf(game, at) {
@@ -522,7 +563,7 @@ export function startedSecondHalf(game, at) {
     return game;
   }
   const { benchOrderAtEndHalf, ...rest } = game;
-  return withKeeperMark({ ...rest, state: SECOND_HALF, secondHalfStartedAt: at, benchSince: {}, plannedPairs: [] });
+  return { ...rest, state: SECOND_HALF, secondHalfStartedAt: at, benchSince: {}, plannedPairs: [] };
 }
 
 /** End Half in the second half: saves the time. The full-time screen is GDA-50. */
@@ -716,7 +757,7 @@ export function fieldMoved(game, playerId, spot) {
   }
   const moved = movedOnto(game, playerId, spot);
   const pairs = pairsOf(game).map((pair) => (pair.fieldId === null && pair.place === spot.place ? { ...pair, fieldId: playerId, place: null } : pair));
-  return { game: withKeeperMark({ ...moved.game, plannedPairs: pairs }), changes: moved.changes };
+  return { game: { ...moved.game, plannedPairs: pairs }, changes: moved.changes };
 }
 
 /**
@@ -731,7 +772,10 @@ export function swapped(game, at) {
   const positions = [...activePositions(game)];
   let order = [...(game.benchOrder ?? [])];
   const benchSince = { ...game.benchSince };
-  const hadTurn = { ...game.hadTurn }; // Turn marks (GDA-27): one per player, for the whole game.
+  // Bench numbers (GDA-56): { playerId: 1, 2, 3... } in the order players first came off the bench.
+  // Kept for the whole game; a player keeps their first number. Pairs are handled in strip order.
+  const benchNumbers = { ...game.benchNumbers };
+  let nextNumber = Math.max(0, ...Object.values(benchNumbers)) + 1;
   const changes = [];
   for (const pair of pairsOf(game)) {
     const place = pair.fieldId !== null ? positions.indexOf(pair.fieldId) : pair.place;
@@ -742,7 +786,9 @@ export function swapped(game, at) {
     positions[place] = pair.benchId;
     order = benchAfterMove(order, pair.benchId, pair.fieldId, BENCH, place);
     delete benchSince[pair.benchId];
-    hadTurn[pair.benchId] = true; // Back on from the bench: earns the mark (setting it again adds nothing).
+    if (!benchNumbers[pair.benchId]) {
+      benchNumbers[pair.benchId] = nextNumber++; // First time off the bench: takes the next number.
+    }
     changes.push({ playerId: pair.benchId, from: BENCH, to: place });
     if (pair.fieldId !== null) {
       benchSince[pair.fieldId] = at;
@@ -752,16 +798,16 @@ export function swapped(game, at) {
   if (changes.length === 0) {
     return null;
   }
-  return { game: withKeeperMark({ ...withFirstHalf(game, { positions }), benchOrder: order, benchSince, hadTurn, plannedPairs: [] }), changes };
+  return { game: { ...withFirstHalf(game, { positions }), benchOrder: order, benchSince, benchNumbers, plannedPairs: [] }, changes };
 }
 
 /**
  * Undo after Swap: puts back the players, the bench order, the bench times and the
- * planned pairs and the turn marks, from `before`, the game as it was just before Swap.
+ * planned pairs and the bench numbers, from `before`, the game as it was just before Swap.
  */
 export function swapUndone(game, before) {
   const restored = withFirstHalf(game, { positions: before.lineups[lineupKey(before)].positions });
-  return { ...restored, benchOrder: before.benchOrder, benchSince: before.benchSince, hadTurn: before.hadTurn ?? {}, plannedPairs: before.plannedPairs ?? [] };
+  return { ...restored, benchOrder: before.benchOrder, benchSince: before.benchSince, benchNumbers: before.benchNumbers ?? {}, plannedPairs: before.plannedPairs ?? [] };
 }
 
 /** The event log entry for a Swap: one event, one time, all the players who moved. */
@@ -769,9 +815,9 @@ export function swapEvent(gameId, changes, at, half = "firstHalf") {
   return { gameId, type: SWAP, at, half, changes };
 }
 
-/** True if this player has had their bench turn this game (GDA-27). No mark means not yet. */
-export function hasHadTurn(game, playerId) {
-  return Boolean(game.hadTurn?.[playerId]);
+/** The player's bench-order number (GDA-56), or null if they have not come off the bench. */
+export function benchNumberOf(game, playerId) {
+  return game.benchNumbers?.[playerId] ?? null;
 }
 
 // ---- Goals (GDA-37, 38, 39, 40) ----

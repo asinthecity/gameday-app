@@ -5,8 +5,11 @@
 // containing < or & just shows as typed.
 
 import { hasRecord, scorerSummary, csvFileName } from "./record-rules.js";
-import { FINISHED, startedAtOf, endedAtOf, benchSeconds, benchTimerText, canCreateGame, clockText, isBenchLate, ringFraction, formatGameDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, hasHadTurn, rotationOf, MIN_ROTATION, MAX_ROTATION, scoreOf, scoreText, canAddGoal, canRemoveLastGoal, fieldPlayerIds, lastGoal, US, goalsOf } from "./game-rules.js";
+import { FINISHED, startedAtOf, endedAtOf, benchSeconds, benchTimerText, canCreateGame, clockText, isBenchLate, ringFraction, formatGameDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, benchNumberOf, rotationOf, halfOf, MIN_ROTATION, NOT_STARTED, scoreOf, scoreText, canAddGoal, canRemoveLastGoal, fieldPlayerIds, lastGoal, US, goalsOf } from "./game-rules.js";
+import { checkFormation, pitchRows } from "./formation-rules.js";
+import { archiveWarning, canDeleteGame, sheetStatus } from "./sheet-rules.js";
 import { canSaveName, initialsFor } from "./squad-rules.js";
+import { canSwitchTeams, deleteRefusal, deleteSummary, IN_PROGRESS_REFUSAL, LAST_TEAM_MESSAGE, LOCKED_MESSAGE, plural, UPGRADE_FAILED_MESSAGE } from "./team-rules.js";
 
 /** Makes one element. Props starting "on" are tap or typing handlers. */
 function h(tag, props = {}, ...children) {
@@ -26,9 +29,9 @@ function h(tag, props = {}, ...children) {
   return element;
 }
 
-function header(title, onBack, right = null) {
+function header(title, onBack, right = null, extra = null) {
   const back = onBack ? h("button", { class: "back", "aria-label": "Back", onclick: onBack }, "‹") : null;
-  return h("div", { class: "hdr" }, back, h("h1", {}, title), right);
+  return h("div", { class: "hdr" }, back, h("h1", {}, title), right, extra);
 }
 
 function problemLine(text) {
@@ -47,60 +50,299 @@ function updateCard(notice, actions) {
   return h("div", { class: "card" }, h("b", {}, notice.text), problemLine(notice.problem), button);
 }
 
-function gameCard(game, actions) {
+/** The ⋯ button in its own area, so tapping it never opens the game (GDA-69). */
+function menuButton(game, actions) {
+  return h("button", { class: "ic menuBtn", "aria-label": "Game menu", onclick: () => actions.openMenu(game.id) }, "\u22ef");
+}
+
+/** The small menu under a card's ⋯ button. A transparent cover behind it closes it when I tap away. */
+function cardMenu(game, state, actions, items) {
+  if (state.menuId !== game.id) {
+    return null;
+  }
+  return h(
+    "div",
+    {},
+    h("div", { class: "menuCover", onclick: actions.closeMenu }),
+    h("div", { class: "pop cardMenu" }, ...items)
+  );
+}
+
+function gameCard(game, state, actions) {
+  // Only a game not started has a menu (Delete). A game in progress has none.
+  const hasMenu = canDeleteGame(game);
   return h(
     "div",
     { class: "card game" },
-    h("b", {}, `vs ${game.opposition}`),
-    h("div", {}, `${formatGameDate(game.date)} · ${formatKickOff(game.kickOff)}`),
-    h("div", {}, game.venue),
+    h(
+      "div",
+      { class: "head" },
+      h("div", { class: "info" }, h("b", {}, `vs ${game.opposition}`), h("div", {}, `${formatGameDate(game.date)} \u00b7 ${formatKickOff(game.kickOff)}`), h("div", {}, game.venue)),
+      hasMenu ? h("div", { class: "menuwrap" }, menuButton(game, actions)) : null
+    ),
+    hasMenu
+      ? cardMenu(game, state, actions, [h("button", { class: "mi d deleteGame", onclick: () => actions.askDelete(game.id) }, "Delete")])
+      : null,
     h("button", { class: "btn", onclick: () => actions.openLineUp(game.id) }, "Line-up")
   );
 }
 
 const FILE_PROBLEM = "Could not make the file. The game itself is saved. Try Save file again.";
 
-/** A finished game on Home: the result and one Save file button. No history screen. */
+/** The Sheet line on a finished game (GDA-47): Sent / Sending / Not sent yet + Send now / Sheet not set up. */
+function sheetLine(game, state, actions) {
+  const status = sheetStatus(game, state.sheetSettings, state.sendingId, state.sheetProblem[game.id]);
+  if (!status) {
+    return [];
+  }
+  const line = (text) => h("div", { class: "sheetStatus", "data-status": status.kind }, h("b", {}, text));
+  if (status.kind === "sent") {
+    return [h("div", { class: "sheetStatus ok", "data-status": "sent" }, h("b", {}, "\u2713 Sent to the Sheet"))];
+  }
+  if (status.kind === "sending") {
+    return [line("Sending\u2026")];
+  }
+  if (status.kind === "notSetUp") {
+    return [line("Sheet not set up"), h("button", { class: "btn", onclick: actions.openSheetSettings }, "Sheet settings")];
+  }
+  return [
+    h("div", { class: "sheetStatus err", "data-status": "notSent" }, h("b", {}, status.checkSettings ? "Not sent yet - check Sheet settings" : "Not sent yet")),
+    h("button", { class: "btn pri sendNow", onclick: () => actions.sendNow(game.id) }, "Send now"),
+  ];
+}
+
+/** A finished game on Home: the result, its Sheet status and a ⋯ menu (Save file, Archive). No history screen. */
 function finishedCard(game, state, actions) {
   const failed = state.fileProblemFor === game.id;
   return h(
     "div",
     { class: "card finished", "data-game": game.id },
-    h("b", {}, `vs ${game.opposition} \u00b7 ${game.record.us} - ${game.record.them}`),
-    h("div", {}, `${formatGameDate(game.date)} \u00b7 Finished`),
-    failed ? h("p", { class: "problem", role: "alert" }, FILE_PROBLEM) : null,
-    h("button", { class: "btn saveFile", onclick: () => actions.saveFile(game.id) }, "Save file")
+    h(
+      "div",
+      { class: "head" },
+      h("div", { class: "info" }, h("b", {}, `vs ${game.opposition} \u00b7 ${game.record.us} - ${game.record.them}`), h("div", {}, `${formatGameDate(game.date)} \u00b7 Finished`)),
+      h("div", { class: "menuwrap" }, menuButton(game, actions))
+    ),
+    cardMenu(game, state, actions, [
+      h("button", { class: "mi saveFile", onclick: () => actions.saveFile(game.id) }, "Save file"),
+      h("button", { class: "mi d archiveGame", onclick: () => actions.askArchive(game.id) }, "Archive"),
+    ]),
+    ...sheetLine(game, state, actions),
+    failed ? h("p", { class: "problem", role: "alert" }, FILE_PROBLEM) : null
   );
 }
 
+const ARCHIVE_WARNINGS = {
+  notInSheet: "Warning: this game is not in the Sheet yet. Tap Cancel, then Send now or Save file first.",
+  noStatus: "Warning: this older game has no Sheet record. Tap Cancel and Save file first.",
+};
+
+/** "Archive v Eagles from the list?" with one confirm and, if the game is not in the Sheet, a red warning (GDA-69). */
+function archiveSheet(state, actions) {
+  const game = state.games.find((g) => g.id === state.archiveId);
+  if (!game) {
+    return null;
+  }
+  const warning = archiveWarning(game);
+  return h(
+    "div",
+    { class: "scrim", id: "archiveConfirm" },
+    h(
+      "div",
+      { class: "sheet" },
+      h("h2", {}, `Archive v ${game.opposition} from the list?`),
+      h("p", { class: "archiveNote" }, warning === null ? "It stays saved on this phone and in the Sheet." : "It stays saved on this phone."),
+      warning ? h("p", { class: "archiveWarn", role: "alert" }, ARCHIVE_WARNINGS[warning]) : null,
+      h("button", { class: "btn del", id: "confirmArchive", onclick: actions.confirmArchive }, "Archive"),
+      h("button", { class: "btn", id: "cancelArchive", onclick: actions.cancelArchive }, "Cancel")
+    )
+  );
+}
+
+/** "Delete the game v Eagles on Sun 15 Nov?" with one confirm (GDA-66). */
+function deleteSheet(state, actions) {
+  const game = state.games.find((g) => g.id === state.deleteId);
+  if (!game) {
+    return null;
+  }
+  return h(
+    "div",
+    { class: "scrim", id: "deleteConfirm" },
+    h(
+      "div",
+      { class: "sheet" },
+      h("h2", {}, `Delete the game v ${game.opposition} on ${formatGameDate(game.date)}? This can't be undone.`),
+      h("button", { class: "btn del", id: "confirmDelete", onclick: actions.confirmDelete }, "Delete"),
+      h("button", { class: "btn", id: "cancelDelete", onclick: actions.cancelDelete }, "Cancel")
+    )
+  );
+}
+
+/** Add team / Team settings (GDA-68): name, players per side, half length. */
+function teamFormScreen(state, actions) {
+  const form = state.teamForm;
+  const adding = form.mode === "add";
+  const field = (id, label, value, error, numeric) => {
+    const input = h("input", { id, type: "text", autocomplete: "off", spellcheck: "false", class: error ? "bad" : "" });
+    if (numeric) {
+      input.setAttribute("inputmode", "numeric");
+    }
+    input.value = value;
+    return h("div", { class: "f" }, h("label", { for: id }, h("span", {}, label)), input, error ? h("p", { class: "problem", role: "alert" }, error) : null);
+  };
+  const refusal = deleteRefusal(state.teams, state.games);
+  const deleteArea = adding
+    ? null
+    : refusal === "only"
+      ? h("p", { class: "hint", id: "onlyTeam" }, LAST_TEAM_MESSAGE)
+      : h("button", { class: "btn del", id: "deleteTeam", onclick: actions.askDeleteTeam }, "Delete team");
+  return {
+    nodes: [
+      header(adding ? "Add team" : "Team settings", actions.cancelTeamForm),
+      h(
+        "div",
+        { class: "body" },
+        field("teamName", "Team name", form.values.name, form.errors.name),
+        field("teamSize", "Players per side (5 to 11)", form.values.size, form.errors.size, true),
+        field("teamMinutes", "Half length (minutes)", form.values.minutes, form.errors.minutes, true),
+        adding ? null : h("p", { class: "hint" }, "Size and half length apply to new games only. Existing games keep theirs."),
+        problemLine(state.problem),
+        h("button", { class: "btn pri big", id: "saveTeam", onclick: actions.saveTeam }, "Save"),
+        h("button", { class: "btn", id: "cancelTeam", onclick: actions.cancelTeamForm }, "Cancel"),
+        deleteArea
+      ),
+      state.deleteTeamOpen ? deleteTeamSheet(state, actions, refusal) : null,
+    ].filter(Boolean),
+  };
+}
+
+/** The Delete team confirm, or the refusal when a game is in progress in that team. */
+function deleteTeamSheet(state, actions, refusal) {
+  const team = state.teams.find((t) => t.id === state.currentTeamId);
+  if (refusal) {
+    return h("div", { class: "scrim", id: "deleteTeamConfirm" }, h("div", { class: "sheet" }, h("h2", {}, `Can't delete ${team.name}`), h("p", { class: "refuse" }, IN_PROGRESS_REFUSAL + "."), h("button", { class: "btn", id: "cancelDeleteTeam", onclick: actions.cancelDeleteTeam }, "OK")));
+  }
+  const counts = deleteSummary(state.players, state.games);
+  return h(
+    "div",
+    { class: "scrim", id: "deleteTeamConfirm" },
+    h(
+      "div",
+      { class: "sheet" },
+      h("h2", {}, `Delete team ${team.name}?`),
+      h("p", { id: "deleteTeamCounts" }, `This erases ${plural(counts.players, "player")}, ${plural(counts.games, "game")} (archived games included), their events and the Sheet settings for this team. It can't be undone.`),
+      counts.notInSheet > 0 ? h("p", { class: "problem", id: "deleteTeamWarn" }, `${counts.notInSheet} of these games are not in the Sheet. Tap Cancel and Save file or Send now first.`) : null,
+      h("p", { class: "hint" }, "The Google Sheet itself is not touched. Other teams are not affected."),
+      h("button", { class: "btn del", id: "confirmDeleteTeam", onclick: actions.confirmDeleteTeam }, "Delete team"),
+      h("button", { class: "btn", id: "cancelDeleteTeam", onclick: actions.cancelDeleteTeam }, "Cancel")
+    )
+  );
+}
+
+/** Sheet settings (GDA-47): the script's web address and secret, kept only on this phone. */
+function sheetSettingsScreen(state, actions) {
+  const settings = state.sheetDraft ?? state.sheetSettings ?? {};
+  const field = (id, label, value, type) => {
+    const input = h("input", { id, type, autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false" });
+    input.value = value ?? "";
+    return h("div", { class: "f" }, h("label", { for: id }, h("span", {}, label)), input);
+  };
+  return {
+    nodes: [
+      header("Sheet settings", actions.goHome),
+      h(
+        "div",
+        { class: "body" },
+        field("sheetUrl", "Sheet web address", settings.url, "text"),
+        field("sheetSecret", "Secret", settings.secret, "password"),
+        problemLine(state.problem),
+        state.sheetSaved ? h("p", { id: "sheetSaved" }, 'Saved. Games marked "Sheet not set up" now show Send now.') : null,
+        h("button", { class: "btn pri big", id: "saveSheet", onclick: actions.saveSheetSettings }, "Save")
+      ),
+    ],
+  };
+}
+
+/** The current team's name and size under the Game Day heading (cut short if very long). */
+function teamLine(state) {
+  const team = state.teams.find((t) => t.id === state.currentTeamId);
+  return team ? h("p", { class: "team", id: "teamLine" }, h("b", {}, team.name), ` \u00b7 ${team.playersPerSide} a side`) : null;
+}
+
+/** The team list at the top of the menu: tick on the current team, locked while a game is in progress. */
+function teamMenuItems(state, actions) {
+  const locked = !canSwitchTeams(state.games);
+  const items = state.teams.map((team) => {
+    const label = (team.id === state.currentTeamId ? "\u2713 " : "\u00a0\u00a0\u00a0 ") + team.name;
+    return h("button", { class: "mi teamItem", "data-team": team.id, disabled: locked, onclick: () => actions.switchTeam(team.id) }, label);
+  });
+  return [
+    h("div", { class: "mhd" }, "Teams"),
+    locked ? h("div", { class: "mlock", id: "teamLock" }, LOCKED_MESSAGE) : null,
+    ...items,
+    h("button", { class: "mi addTeam", disabled: locked, onclick: actions.openAddTeam }, "+ Add team"),
+  ];
+}
+
 function homeScreen(state, actions) {
+  // The saved data could not be upgraded and was left as it was: say so, and never show an empty squad.
+  if (state.upgradeFailed) {
+    return {
+      nodes: [header("Game Day"), h("div", { class: "body" }, h("div", { class: "problem upgradeFailed" }, UPGRADE_FAILED_MESSAGE))],
+    };
+  }
   const hasPlayers = state.players.length > 0;
   const createButton = hasPlayers
     ? h("button", { class: "btn pri big", onclick: actions.openCreateGame }, "+ Create game")
     : null;
-  const cards = state.games.filter((game) => game.state !== FINISHED).map((game) => gameCard(game, actions));
+  const cards = state.games.filter((game) => game.state !== FINISHED).map((game) => gameCard(game, state, actions));
   // Finished games with a record keep one Save file button. Old test games (no record) stay hidden.
-  const finished = state.games.filter(hasRecord).map((game) => finishedCard(game, state, actions));
-  const squadPart = hasPlayers
-    ? [h("button", { class: "btn", onclick: actions.openSquad }, `Squad (${state.players.length})`)]
+  const finished = state.games.filter((game) => hasRecord(game) && !game.archived).map((game) => finishedCard(game, state, actions));
+  const addPlayers = hasPlayers
+    ? []
     : [
         h("div", { class: "msg" }, "Add your players"),
         h("button", { class: "btn pri big", onclick: actions.addFromHome }, "+ Add players"),
       ];
+  // The ☰ menu at the top holds Squad and Sheet settings (GDA-69).
+  const topMenu = h(
+    "div",
+    { class: "menuwrap topMenuWrap" },
+    h("button", { class: "ic topMenuBtn", "aria-label": "Menu", onclick: actions.openTopMenu }, "\u2630"),
+    // The items stay in the page but hidden until ☰ is tapped.
+    h(
+      "div",
+      {},
+      state.topMenuOpen ? h("div", { class: "menuCover", onclick: actions.closeMenu }) : null,
+      h(
+        "div",
+        { class: "pop topMenu" + (state.topMenuOpen ? " show" : "") },
+        ...teamMenuItems(state, actions),
+        h("div", { class: "mhd" }, "This team"),
+        h("button", { class: "mi teamSettings", onclick: actions.openTeamSettings }, "Team settings"),
+        // With no players, "+ Add players" on Home does the job, so the Squad item waits until there is a squad.
+        hasPlayers ? h("button", { class: "mi squadItem", onclick: actions.openSquad }, `Squad (${state.players.length})`) : null,
+        h("button", { class: "mi sheetSettings", onclick: actions.openSheetSettings }, "Sheet settings")
+      )
+    )
+  );
   return {
     nodes: [
-      header("Game Day"),
+      header("Game Day", null, topMenu),
       h(
         "div",
         { class: "body" },
+        teamLine(state),
         updateCard(state.updateNotice, actions),
         problemLine(state.problem),
         createButton,
         ...cards,
         ...finished,
-        ...squadPart
+        ...addPlayers
       ),
-    ],
+      deleteSheet(state, actions),
+      archiveSheet(state, actions),
+    ].filter(Boolean),
   };
 }
 
@@ -223,16 +465,16 @@ function detailField(form, key, label, inputProps, onChange) {
 
 /**
  * The rotation stepper: - and + around the number of minutes. `value` is read each
- * time; `onStep(change)` is told -1 or +1. Both buttons grey out at the ends (1 and 25).
+ * time; `onStep(change)` is told -1 or +1. Both buttons grey out at the ends (1 and the half length, at most 25).
  */
-function rotationStepper(value, onStep) {
+function rotationStepper(value, onStep, max) {
   const number = h("div", { class: "val", id: "rotValue" });
   const less = h("button", { class: "btn", id: "rotLess", "aria-label": "Shorter", onclick: () => step(-1) }, "\u2212");
   const more = h("button", { class: "btn", id: "rotMore", "aria-label": "Longer", onclick: () => step(1) }, "+");
   const show = () => {
     number.textContent = `${value()} min`;
     less.disabled = value() <= MIN_ROTATION;
-    more.disabled = value() >= MAX_ROTATION;
+    more.disabled = value() >= max;
   };
   const step = (change) => {
     onStep(change);
@@ -270,10 +512,14 @@ function createGameScreen(state, actions) {
           rotationStepper(
             () => form.rotationMinutes,
             (change) => {
-              form.rotationMinutes = Math.min(MAX_ROTATION, Math.max(MIN_ROTATION, form.rotationMinutes + change));
-            }
+              form.rotationMinutes = Math.min(Math.min(25, form.halfMinutes), Math.max(MIN_ROTATION, form.rotationMinutes + change));
+            },
+            Math.min(25, form.halfMinutes)
           )
         ),
+        // GDA-22: the half length is the team's, fixed for this game. Shown so it is not a surprise.
+        h("div", { class: "ro", id: "halfInfo" }, `Half length: ${form.halfMinutes} min (from the team)`),
+        form.rotationNote ? h("div", { class: "ro", id: "rotNote" }, form.rotationNote) : null,
         make,
         problemLine(state.problem)
       ),
@@ -288,11 +534,9 @@ function createGameScreen(state, actions) {
  */
 function playerSlot(player, state, canMove, isKeeper = false, benchTimer = false) {
   const planned = state.screen === "game" && pairsOf(openGame(state)).some((pair) => pair.benchId === player.id || pair.fieldId === player.id);
-  // The 'had a turn' tick (GDA-27): shown on field and bench circles during a game. A shape, not just colour.
-  const turnMark =
-    (state.screen === "game" || state.screen === "halfTime") && hasHadTurn(openGame(state), player.id)
-      ? h("span", { class: "turn", "aria-label": "Has had a bench turn", title: "Has had a bench turn" }, "\u2713")
-      : null;
+  // The bench-order number (GDA-56): shown on field and bench circles during a game. A number, not just colour.
+  const number = (state.screen === "game" || state.screen === "halfTime") ? benchNumberOf(openGame(state), player.id) : null;
+  const turnMark = number ? h("span", { class: "turn", "aria-label": `Bench order ${number}`, title: `Bench order ${number}` }, String(number)) : null;
   return h(
     "div",
     {
@@ -336,9 +580,10 @@ function emptySlot(place, canMove, state) {
   );
 }
 
-function lineUpRow(title, rowClass, players, state, canMove, benchTimers = false) {
+function lineUpRow(title, rowClass, players, state, canMove, benchTimers = false, zone = null) {
   const slots = players.map((player) => playerSlot(player, state, canMove, false, benchTimers));
-  return h("div", { class: rowClass }, h("span", { class: "t" }, title), ...slots);
+  // `zone` makes the whole row a drop target (GDA-62): "absent" or "bench", line-up screen only.
+  return h("div", { class: rowClass, ...(zone ? { "data-zone": zone } : {}) }, h("span", { class: "t" }, title), ...slots);
 }
 
 /** The bottom button. While a player is selected it acts on them instead. */
@@ -353,30 +598,30 @@ function lineUpButton(view, state, actions) {
 
 /** The pitch and bench, shared by the line-up and the before-kick-off screen. */
 function pitchAndBench(view, state, canMove, crowded, live = false) {
+  const game = openGame(state);
   const line = (places) =>
     h(
       "div",
-      { class: "line" },
+      { class: places.length >= 4 ? `line across${places.length}` : "line" },
       ...places.map((place) => {
         const player = view.positions[place];
         return player ? playerSlot(player, state, canMove, place === 0) : emptySlot(place, canMove, state);
       })
     );
-  // Forwards at the top and goal at the bottom. Place numbers are in game-rules.js.
+  // GDA-22: one row per line of the game's shape, attack at the top and goal at the bottom.
+  const rows = pitchRows(game.formation);
   const pitch = h(
     "div",
-    { class: crowded ? "pitch tight" : "pitch" },
-    line([7, 8]),
-    line([4, 5, 6]),
-    line([1, 2, 3]),
-    line([0])
+    // Five or more rows need the smaller circles to fit.
+    { class: crowded || rows.length >= 5 ? "pitch tight" : "pitch", style: `grid-template-rows: repeat(${rows.length}, minmax(0, 1fr))` },
+    ...rows.map(line)
   );
   if (live) {
     // Game under way: bench circles carry timers; nobody on the bench means no bench row.
     const rowClass = view.bench.length > 6 ? "row live many" : "row live";
     return view.bench.length > 0 ? [pitch, lineUpRow("BENCH", rowClass, view.bench, state, canMove, true)] : [pitch];
   }
-  return [pitch, lineUpRow("BENCH", "row", view.bench, state, canMove)];
+  return [pitch, lineUpRow("BENCH", "row", view.bench, state, canMove, false, state.screen === "lineUp" ? "bench" : null)];
 }
 
 function openGame(state) {
@@ -394,31 +639,75 @@ function lineUpScreen(state, actions) {
     fixed: true,
     noMove: true,
     nodes: [
-      header("1st-half line-up", actions.goHome, h("span", { class: "tag" }, game.formation)),
+      header("1st-half line-up", actions.goHome, h("span", { class: "tag" }, game.formation), cogButton(actions)),
       h(
         "div",
         { class: "lu" },
+        formationBox(game, actions),
         ...pitchAndBench(view, state, true, view.bench.length > 6 || view.absent.length > 6),
-        view.absent.length > 0 ? lineUpRow("ABSENT", "row ab", view.absent, state, true) : null
+        // GDA-62: always there, below the bench, even when empty (then slim).
+        lineUpRow("ABSENT", view.absent.length > 0 ? "row ab" : "row ab empty", view.absent, state, true, false, "absent")
       ),
       h("div", { class: "acts" }, ...lineUpActions(view, state, actions)),
+      gameDetailsSheet(state, game, actions),
     ],
   };
 }
 
-/** The row under the clock with the rotation chip. Tapping the chip opens the stepper. */
-function rotationStrip(game, actions) {
-  // The swap message (GDA-35) shares the strip with the chip; drawClock fills it in and hides it when empty.
-  return h(
-    "div",
-    { class: "strip", id: "rotStrip" },
-    h("button", { class: "chip", id: "rotChip", onclick: actions.openRotation }, `${rotationOf(game)} min`),
-    h("div", { class: "sl", id: "swapMsg", hidden: true })
-  );
+/**
+ * The formation box (GDA-22). Typing is checked at once against the game's team size
+ * (its number of places): a valid shape is saved and the pitch redrawn in place; an
+ * invalid one shows what is wrong and the pitch keeps the last valid shape. From
+ * kick-off the box is disabled and says so. Only the box locks.
+ */
+function formationBox(game, actions) {
+  const locked = game.state !== NOT_STARTED;
+  const size = game.lineups.firstHalf.positions.length;
+  const message = h("div", { class: "fmsg", id: "fmMsg", role: "alert" });
+  const input = h("input", {
+    id: "formation",
+    type: "text",
+    value: game.formation,
+    inputmode: "numeric",
+    autocomplete: "off",
+    spellcheck: "false",
+    "aria-label": "Formation, defence to attack",
+    disabled: locked,
+  });
+  input.addEventListener("input", () => {
+    const result = checkFormation(input.value, size);
+    input.classList.toggle("bad", !result.ok);
+    message.textContent = result.ok ? "" : `${result.message} The pitch keeps ${game.formation}.`;
+    if (result.ok && result.formation !== game.formation) {
+      actions.setFormation(result.formation);
+    }
+  });
+  return h("div", { class: "fm" }, h("label", { for: "formation" }, "Formation"), input, h("span", { class: "fsub" }, locked ? "locked from kick-off" : "defence to attack"), message);
 }
 
-/** The stepper sheet, drawn only while open. Done is the only way to close it. */
-function rotationSheet(state, game, actions) {
+/** Redraws only the pitch (line-up screen), so the formation box keeps its focus while typing. */
+export function drawPitch(state) {
+  const game = openGame(state);
+  const view = lineUpView(game, state.players);
+  const [pitch] = pitchAndBench(view, state, true, view.bench.length > 6 || view.absent.length > 6);
+  document.querySelector(".pitch")?.replaceWith(pitch);
+  const tag = document.querySelector(".hdr .tag");
+  if (tag) {
+    tag.textContent = game.formation;
+  }
+}
+
+/** The settings cog (GDA-64): opens the Game details sheet. Sits at the far edge, away from the game buttons. */
+function cogButton(actions) {
+  return h("button", { class: "cog", id: "cog", "aria-label": "Game details", onclick: actions.openRotation }, "\u2699");
+}
+
+/**
+ * The Game details sheet (GDA-64), drawn only while open: the rotation length stepper,
+ * opposition and date as read-only text, and Done. Each tap on - or + is saved at once;
+ * Done only closes the sheet.
+ */
+function gameDetailsSheet(state, game, actions) {
   if (!state.rotationOpen) {
     return null;
   }
@@ -428,7 +717,11 @@ function rotationSheet(state, game, actions) {
     h(
       "div",
       { class: "sheet" },
-      rotationStepper(() => rotationOf(openGame(state)), actions.stepRotation),
+      h("h2", {}, "Game details"),
+      h("div", { class: "lbl" }, "Rotation length"),
+      rotationStepper(() => rotationOf(openGame(state)), actions.stepRotation, Math.min(25, halfOf(game))),
+      h("div", { class: "ro", id: "detOpp" }, `Opposition: ${game.opposition}`),
+      h("div", { class: "ro", id: "detDate" }, `Date: ${formatGameDate(game.date)}`),
       h("button", { class: "btn pri", id: "rotDone", onclick: actions.closeRotation }, "Done")
     )
   );
@@ -450,8 +743,8 @@ function scoreBox(game, actions) {
 }
 
 /** The bar at the top of the game screens: the score on the left, the half and the time on the right. */
-function clockBar(text, half, game, actions) {
-  return h("div", { class: "clk" }, scoreBox(game, actions), h("div", { class: "ck" }, h("span", { class: "hf" }, half), h("b", { id: "clock" }, text)));
+function clockBar(text, half, game, actions, cogActions) {
+  return h("div", { class: "clk" }, scoreBox(game, actions), h("div", { class: "ck" }, h("span", { class: "hf" }, half), h("b", { id: "clock" }, text)), cogButton(cogActions));
 }
 
 /** Before kick-off: look, but not touch. The game has not started and nothing here is saved. */
@@ -462,8 +755,7 @@ function readyScreen(state, actions) {
     fixed: true,
     noMove: true,
     nodes: [
-      clockBar("0:00", "1ST HALF", game, null),
-      rotationStrip(game, actions),
+      clockBar("0:00", "1ST HALF", game, null, actions),
       h(
         "div",
         { class: "lu" },
@@ -482,7 +774,7 @@ function readyScreen(state, actions) {
           h("button", { class: "btn pri", onclick: actions.startFirstHalf }, "START 1ST HALF")
         )
       ),
-      rotationSheet(state, game, actions),
+      gameDetailsSheet(state, game, actions),
     ].filter(Boolean),
   };
 }
@@ -502,11 +794,9 @@ function gameScreen(state, actions) {
     noMove: true,
     nodes: [
       state.welcome ? h("div", { class: "welcome", id: "welcome" }, "Welcome back") : null,
-      clockBar(clockText(startedAtOf(game), Date.now()), game.state === "second half" ? "2ND HALF" : "1ST HALF", game, actions),
-      rotationStrip(game, actions),
-      h("div", { class: "strip time", id: "timeStrip", hidden: true }, h("span", { class: "big" }, "TIME")),
+      clockBar(clockText(startedAtOf(game), Date.now(), halfOf(game)), game.state === "second half" ? "2ND HALF" : "1ST HALF", game, actions, actions),
+      swapStrip(game, state, actions),
       h("div", { class: "lu" }, ...pitchAndBench(view, state, true, view.bench.length > 6, true)),
-      swapRow(game, state, actions),
       h(
         "div",
         { class: "acts" },
@@ -520,7 +810,7 @@ function gameScreen(state, actions) {
         )
       ),
       goalToast(state, actions),
-      rotationSheet(state, game, actions),
+      gameDetailsSheet(state, game, actions),
       goalSheet(state, game, actions),
       removeGoalSheet(state, game, actions),
     ].filter(Boolean),
@@ -583,18 +873,23 @@ function removeGoalSheet(state, game, actions) {
 }
 
 /**
- * Above End Half: the Swap button while pairs are planned, or the Undo bar for about
- * 5 seconds after a Swap. Nothing when neither applies. (GDA-27 and GDA-35 add their
- * parts of the game screen next to this row; this row is the only one GDA-30 owns.)
+ * The one fixed-height strip under the clock (GDA-63). It holds, one at a time, the Swap
+ * Time message (drawSwapMessage fills it in), "Swap done / Undo" for about 5 seconds after
+ * a Swap, or TIME when the half is over (drawClock shows it). The Swap button sits beside
+ * the message or TIME while pairs are planned. The height never changes, so the pitch and
+ * bench never move. The rules for Swap, Undo and the message are unchanged.
  */
-function swapRow(game, state, actions) {
-  if (pairsOf(game).length > 0) {
-    return h("div", { class: "swr" }, h("button", { class: "btn pri swp", id: "swap", onclick: actions.swap }, "Swap"));
-  }
-  if (state.undo && Date.now() < state.undo.until) {
-    return h("div", { class: "swr" }, h("div", { class: "undo", id: "undo" }, h("span", {}, "Swap done"), h("button", { onclick: actions.undo }, "Undo")));
-  }
-  return null;
+function swapStrip(game, state, actions) {
+  const planned = pairsOf(game).length > 0;
+  const undoShown = !planned && state.undo && Date.now() < state.undo.until;
+  return h(
+    "div",
+    { class: "strip", id: "strip" },
+    h("div", { class: "sl", id: "swapMsg", hidden: true }),
+    h("div", { class: "sl time", id: "timeStrip", hidden: true }, h("span", { class: "big" }, "TIME")),
+    undoShown ? h("div", { class: "undo", id: "undo" }, h("span", {}, "Swap done"), h("button", { onclick: actions.undo }, "Undo")) : null,
+    planned ? h("button", { class: "btn pri swp", id: "swap", onclick: actions.swap }, "Swap") : null
+  );
 }
 
 let lastActions = null;
@@ -646,17 +941,13 @@ export function drawClock(state) {
   const clock = document.getElementById("clock");
   if (state.screen === "game" && game && clock) {
     const now = Date.now();
-    clock.textContent = clockText(startedAtOf(game), now);
-    const timeUp = isTimeUp(startedAtOf(game), now);
-    const stripChanged = document.getElementById("timeStrip").hidden === timeUp;
-    document.getElementById("timeStrip").hidden = !timeUp;
-    document.getElementById("rotStrip").hidden = timeUp; // The TIME strip takes its place.
+    clock.textContent = clockText(startedAtOf(game), now, halfOf(game));
+    const timeUp = isTimeUp(startedAtOf(game), now, halfOf(game));
+    document.getElementById("timeStrip").hidden = !timeUp; // TIME takes the message's place in the same strip.
     document.getElementById("endHalf").classList.toggle("pri", timeUp);
     drawBenchTimers(game, now);
-    const msgChanged = drawSwapMessage(game, state.players, now, timeUp);
-    if (stripChanged || msgChanged) {
-      drawPairLines(state); // The strip changes the height above, so the lines move with it.
-    }
+    drawSwapMessage(game, state.players, now, timeUp);
+    // The strip never changes height, so the pair lines never need redrawing here.
   }
 }
 
@@ -667,14 +958,14 @@ export function drawClock(state) {
  * colour alone. Gives true when the strip changed height, so the pair lines can follow.
  */
 function drawSwapMessage(game, squad, now, timeUp) {
-  const strip = document.getElementById("rotStrip");
+  const strip = document.getElementById("strip");
   const box = document.getElementById("swapMsg");
   const message = timeUp ? null : swapMessage(game, squad, now);
   const wasShown = !box.hidden;
   if (!message) {
     box.hidden = true;
     box.textContent = "";
-    strip.className = "strip";
+    strip.className = timeUp ? "strip timeup" : "strip";
     return wasShown;
   }
   const name = (id) => squad.find((player) => player.id === id)?.name ?? "";
@@ -776,10 +1067,11 @@ function halfTimeScreen(state, actions) {
     fixed: true,
     noMove: true,
     nodes: [
-      h("div", { class: "hdr ht" }, h("button", { class: "back", "aria-label": "Back", onclick: actions.backToGame }, "\u2039"), h("h1", {}, "HALF TIME"), scoreBox(game, canRemoveLastGoal(game) ? actions : null)),
+      h("div", { class: "hdr ht" }, h("button", { class: "back", "aria-label": "Back", onclick: actions.backToGame }, "\u2039"), h("h1", {}, "HALF TIME"), scoreBox(game, canRemoveLastGoal(game) ? actions : null), cogButton(actions)),
       h("div", { class: "lu" }, ...pitchAndBench(view, state, true, view.bench.length > 6)),
       h("div", { class: "acts" }, problemLine(state.problem), h("button", { class: "btn pri", id: "startSecond", onclick: actions.startSecondHalf }, "Start 2nd Half")),
       removeGoalSheet(state, game, actions),
+      gameDetailsSheet(state, game, actions),
     ],
   };
 }
@@ -810,6 +1102,8 @@ const SCREENS = {
   halfTime: halfTimeScreen,
   over: halfOverScreen,
   saved: savedScreen,
+  sheetSettings: sheetSettingsScreen,
+  teamForm: teamFormScreen,
   cannotOpen: cannotOpenScreen,
 };
 

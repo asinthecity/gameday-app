@@ -2,25 +2,34 @@
 // fully saved or not changed at all. See game-rules.js for what a game holds.
 
 import { change, read } from "./db.js";
-import { SECOND_HALF, goalAdded, goalRemoved, lineupKey, startedSecondHalf, endedHalf, reopenedHalf, benchReordered, fieldMoved, pairPlanned, pairRemoved, swapEvent, swapUndone, swapped, gamesInOrder, halfEndCancelledEvent, halfEndEvent, halfStartEvent, movedOnto, newGame, nextCreatedOrder, positionChangeEvent, prePlaced, startedFirstHalf, withBenchOrder } from "./game-rules.js";
+import { lineUpMoved, SECOND_HALF, goalAdded, goalRemoved, lineupKey, startedSecondHalf, endedHalf, reopenedHalf, benchReordered, fieldMoved, pairPlanned, pairRemoved, swapEvent, swapUndone, swapped, gamesInOrder, halfEndCancelledEvent, halfEndEvent, halfStartEvent, movedOnto, newGame, nextCreatedOrder, positionChangeEvent, prePlaced, startedFirstHalf, withBenchOrder } from "./game-rules.js";
 import { buildRecord, gameAtFullTime } from "./record-rules.js";
+import { canDeleteGame, gameArchived } from "./sheet-rules.js";
 import { squadInOrder } from "./squad-rules.js";
+import { ofTeam, sameTeam, withTeamId } from "./team-rules.js";
 
-/** Every game, in the order Home shows them. */
-export function loadGames(db) {
+/** The squad of the game's own team: a game never sees another team's players. */
+function squadOf(allPlayers, game) {
+  return squadInOrder(allPlayers.filter((player) => sameTeam(player, game)));
+}
+
+/** The games of ONE team, in the order Home shows them. */
+export function loadGames(db, teamId, firstTeamId) {
   return read(db, ["games"], (tx, answer) => {
-    tx.objectStore("games").getAll().onsuccess = (event) => answer(gamesInOrder(event.target.result));
+    tx.objectStore("games").getAll().onsuccess = (event) => answer(gamesInOrder(ofTeam(event.target.result, teamId, firstTeamId)));
   });
 }
 
 /** Saves a new game, pre-placed from the squad. Finishes with its id, once it is saved. */
-export function addGame(db, form) {
+export function addGame(db, form, team, firstTeamId) {
+  const teamId = team.id;
   const id = crypto.randomUUID();
   return change(db, ["games", "players"], (tx, answer) => {
     const games = tx.objectStore("games");
     tx.objectStore("players").getAll().onsuccess = (players) => {
       games.getAll().onsuccess = (event) => {
-        games.add(newGame(form, id, nextCreatedOrder(event.target.result), squadInOrder(players.target.result)));
+        const squad = squadInOrder(ofTeam(players.target.result, teamId, firstTeamId));
+        games.add(withTeamId(newGame(form, id, nextCreatedOrder(event.target.result), squad, team), teamId));
         answer(id);
       };
     };
@@ -53,11 +62,14 @@ export function movePlayer(db, gameId, playerId, spot, at) {
       games.get(gameId).onsuccess = (event) => {
         // Complete the bench order first: a game saved before GDA-61 has none.
         const saved = event.target.result;
-        const ready = saved ? withBenchOrder(saved, squadInOrder(players.target.result)) : null;
-        const moved = ready ? movedOnto(ready, playerId, spot) : null;
+        const ready = saved ? withBenchOrder(saved, squadOf(players.target.result, saved)) : null;
+        const moved = ready ? lineUpMoved(ready, playerId, spot, squadOf(players.target.result, ready)) : null;
         if (moved) {
           games.put(moved.game);
-          tx.objectStore("events").add(positionChangeEvent(gameId, moved.changes, at, lineupKey(ready)));
+          // Marking absent or back in logs nothing, as the Absent button does not.
+          if (moved.changes.length > 0) {
+            tx.objectStore("events").add(positionChangeEvent(gameId, moved.changes, at, lineupKey(ready)));
+          }
         } else {
           tx.abort();
         }
@@ -78,7 +90,7 @@ function changeLive(db, gameId, rule) {
     tx.objectStore("players").getAll().onsuccess = (players) => {
       games.get(gameId).onsuccess = (event) => {
         const saved = event.target.result;
-        const ready = saved ? withBenchOrder(saved, squadInOrder(players.target.result)) : null;
+        const ready = saved ? withBenchOrder(saved, squadOf(players.target.result, saved)) : null;
         const outcome = ready ? rule(ready) : null;
         if (!outcome) {
           tx.abort();
@@ -139,7 +151,7 @@ export function reorderBench(db, gameId, playerId, targetId) {
     tx.objectStore("players").getAll().onsuccess = (players) => {
       games.get(gameId).onsuccess = (event) => {
         const saved = event.target.result;
-        const ready = saved ? withBenchOrder(saved, squadInOrder(players.target.result)) : null;
+        const ready = saved ? withBenchOrder(saved, squadOf(players.target.result, saved)) : null;
         const reordered = ready ? benchReordered(ready, playerId, targetId) : null;
         if (reordered) {
           games.put(reordered);
@@ -157,7 +169,7 @@ export function prePlaceGame(db, id) {
     const games = tx.objectStore("games");
     tx.objectStore("players").getAll().onsuccess = (players) => {
       games.get(id).onsuccess = (event) => {
-        games.put(prePlaced(event.target.result, squadInOrder(players.target.result)));
+        games.put(prePlaced(event.target.result, squadOf(players.target.result, event.target.result)));
       };
     };
   });
@@ -240,7 +252,7 @@ export function fullTime(db, gameId) {
       }
       tx.objectStore("players").getAll().onsuccess = (players) => {
         tx.objectStore("events").index("gameId").getAll(gameId).onsuccess = (events) => {
-          const record = buildRecord(game, squadInOrder(players.target.result), events.target.result);
+          const record = buildRecord(game, squadOf(players.target.result, game), events.target.result);
           if (record) {
             games.put(gameAtFullTime(game, record));
           } else {
@@ -260,4 +272,36 @@ export function addGoal(db, gameId, goal) {
 /** Saves the removal of one goal (Undo, or Remove last goal) at once. */
 export function removeGoal(db, gameId, goalId) {
   return changeGame(db, gameId, (game) => goalRemoved(game, goalId));
+}
+
+/** Marks a game as sent, once Google has confirmed it. Only a game marked "to send" can be marked. */
+export function markSentToSheet(db, gameId) {
+  return changeGame(db, gameId, (game) => (game.toSend ? { ...game, sentToSheet: true } : game));
+}
+
+/**
+ * Deletes ONE game that has not started (GDA-66), with its event log, in one transaction.
+ * A game that has started or finished is refused (nothing changes). Nothing is sent anywhere.
+ */
+export function deleteGame(db, gameId) {
+  return change(db, ["games", "events"], (tx) => {
+    const games = tx.objectStore("games");
+    games.get(gameId).onsuccess = (found) => {
+      const game = found.target.result;
+      if (!game || !canDeleteGame(game)) {
+        tx.abort();
+        return;
+      }
+      games.delete(gameId);
+      const events = tx.objectStore("events");
+      events.index("gameId").getAllKeys(gameId).onsuccess = (keys) => {
+        keys.target.result.forEach((key) => events.delete(key));
+      };
+    };
+  });
+}
+
+/** Archives ONE finished game (GDA-69): sets a flag on it. Nothing is erased, sent or changed in the Sheet. */
+export function archiveGame(db, gameId) {
+  return changeGame(db, gameId, gameArchived);
 }
