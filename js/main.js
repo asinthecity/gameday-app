@@ -27,13 +27,16 @@ import {
   halfOf,
   withFormation,
   NOT_STARTED,
+  FINISHED,
   gameToResume,
   screenForOpening,
   withRotation,
+  withVenue,
+  hereDifferences,
 } from "./game-rules.js";
-import { archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, startFirstHalf, startSecondHalf, swapPlayers, undoSwap, unplanPair } from "./game-store.js";
-import { cleanSheetSettings, canSend, SETTINGS_KEY } from "./sheet-rules.js";
-import { sendGameToSheet } from "./sheet-send.js";
+import { archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, startFirstHalf, startSecondHalf, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
+import { canSend, checkMessage, parseSetupCode, SETTINGS_KEY, sheetTabOf } from "./sheet-rules.js";
+import { checkSheetConnection, sendGameToSheet } from "./sheet-send.js";
 import { shareCsv } from "./share-file.js";
 import { askToKeepDataOnce } from "./persistence.js";
 import { drawClock, drawLineUpActions, drawPairLines, drawPitch, drawScreen, setPhotos } from "./screens.js";
@@ -72,6 +75,7 @@ const state = {
   photos: {}, // playerId -> small photo, kept on this phone only (GDA-52).
   addCameFrom: "home",
   showRemoveWarning: false,
+  hereDraft: null, // GDA-43: the Who is here picker's unsaved draft (a Set of player ids), or null when closed.
   rotationOpen: false, // The rotation stepper sheet on the ready and game screens.
   welcome: false, // The "Welcome back" banner after a restart. Never saved.
   goalToast: null, // After a goal, for about 5 seconds: { goalId, text, until }. Never saved.
@@ -86,9 +90,9 @@ const state = {
   legacySheet: null, // The old shared Sheet setting, read only for the first team if it has none.
   teamForm: null, // The Add / Team settings form: { mode, values, errors }. Never saved until Save.
   deleteTeamOpen: false, // The "Delete team?" confirm. Never saved.
-  sheetSettings: null, // { url, secret } of the CURRENT team. Stored only on this phone.
+  sheetSettings: null, // { url, secret, setup: 2 } of the CURRENT team. Stored only on this phone.
   sheetDraft: null, // What is typed on Sheet settings when a message is shown. Never saved.
-  sheetSaved: false, // "Saved" note on the Sheet settings screen.
+  sheetResult: null, // { ok, text }: the connection message on the Sheet settings screen. Never saved.
   sendingId: null, // The game being sent to the Sheet right now. Never saved.
   sheetProblem: {}, // gameId -> "secret" after the script refused the secret. Never saved.
   menuId: null, // The game whose ⋯ menu is open. Never saved.
@@ -148,13 +152,14 @@ function goTo(screen) {
   state.problem = "";
   state.showRemoveWarning = false;
   state.rotationOpen = false;
+  state.hereDraft = null;
   state.selectedId = null;
   state.undo = null;
   state.goalToast = null;
   state.goalSheet = false;
   state.removeOpen = false;
   state.fileProblemFor = null;
-  state.sheetSaved = false;
+  state.sheetResult = null;
   state.sheetDraft = null;
   state.deleteId = null;
   state.menuId = null;
@@ -589,6 +594,16 @@ const actions = {
     state.games = state.games.map((game) => (game.id === state.gameId ? withRotation(game, minutes) : game));
     drawClock(state);
   },
+  // GDA-88: the Home / Away / Other tag or the Field text, saved at once from the Game details sheet.
+  changeVenue: (change) => {
+    const game = openGame();
+    if (!game || game.state === FINISHED) {
+      return; // Not offered after Full Time.
+    }
+    state.games = state.games.map((g) => (g.id === game.id ? withVenue(g, change) : g));
+    changeGame(db, game.id, (g) => (g.state === FINISHED ? g : withVenue(g, change)))
+      .catch((error) => console.warn("Could not save the venue", error));
+  },
   // GDA-22: a valid typed shape. Only before kick-off. Same places, so nobody moves. It is also the team's last-used shape.
   setFormation: (formation) => {
     const game = openGame();
@@ -606,6 +621,52 @@ const actions = {
   },
   closeRotation: tap(() => {
     state.rotationOpen = false;
+    state.hereDraft = null;
+    draw();
+  }),
+  // GDA-43 picker: the draft is the set of players ticked as here. Nothing is saved until Done.
+  openHere: tap(() => {
+    const game = openGame();
+    state.hereDraft = new Set(state.players.filter((p) => !game.absent.includes(p.id)).map((p) => p.id));
+    draw();
+  }),
+  toggleHereDraft: (playerId) => {
+    if (!state.hereDraft) {
+      return;
+    }
+    const grid = document.querySelector(".pgrid");
+    const scrolled = grid ? grid.scrollTop : 0;
+    state.hereDraft.has(playerId) ? state.hereDraft.delete(playerId) : state.hereDraft.add(playerId);
+    draw();
+    const again = document.querySelector(".pgrid"); // draw() rebuilds the grid; keep its scroll place
+    if (again) {
+      again.scrollTop = scrolled;
+    }
+  },
+  cancelHere: tap(() => {
+    state.hereDraft = null;
+    draw();
+  }),
+  // Done: each changed player goes through the same toggleHere rules, then back to the Game details sheet.
+  doneHere: tap(async () => {
+    const draft = state.hereDraft;
+    state.hereDraft = null;
+    try {
+      const ids = hereDifferences(openGame(), state.players.map((p) => p.id), draft);
+      for (const id of ids) {
+        await toggleHere(db, state.gameId, id, Date.now());
+        state.games = await gamesNow();
+      }
+      if (ids.length > 0) {
+        state.undo = null; // A Swap's Undo would put the old line-up back over this change.
+        state.selectedId = null;
+      }
+      state.problem = "";
+    } catch (error) {
+      console.warn("Who is here did not save", error);
+      state.games = await gamesNow();
+      state.problem = SAVE_PROBLEM;
+    }
     draw();
   }),
   backToLineUp: tap(() => goTo("lineUp")),
@@ -720,29 +781,38 @@ const actions = {
     saveTeamThenHome(() => deleteTeam(db, state.currentTeamId));
   }),
   saveSheetSettings: tap(async () => {
-    const cleaned = cleanSheetSettings(document.getElementById("sheetUrl").value, document.getElementById("sheetSecret").value);
-    if (!cleaned.ok) {
-      // Keep what was typed, so a message does not wipe the box.
-      state.sheetDraft = { url: document.getElementById("sheetUrl").value, secret: document.getElementById("sheetSecret").value };
-      state.problem = cleaned.message;
+    const typed = document.getElementById("sheetCode").value;
+    const parsed = parseSetupCode(typed);
+    state.sheetResult = null;
+    if (!parsed.ok) {
+      // Keep what was typed, so a message does not wipe the box. Nothing is stored.
+      state.sheetDraft = typed;
+      state.problem = parsed.message;
       draw();
       return;
     }
+    const settings = { ...parsed.settings, setup: 2 }; // setup 2 = saved from a GDA-89 setup code.
     try {
-      await updateTeam(db, state.currentTeamId, { sheet: cleaned.settings }); // Each team has its own.
+      await updateTeam(db, state.currentTeamId, { sheet: settings }); // Each team has its own.
     } catch (error) {
       console.warn("Could not save the Sheet settings", error);
       state.problem = SAVE_PROBLEM;
       draw();
       return;
     }
-    state.sheetSettings = cleaned.settings;
-    state.teams = state.teams.map((team) => (team.id === state.currentTeamId ? { ...team, sheet: cleaned.settings } : team));
+    state.sheetSettings = settings;
+    state.teams = state.teams.map((team) => (team.id === state.currentTeamId ? { ...team, sheet: settings } : team));
     state.sheetProblem = {};
     state.problem = "";
-    state.sheetSaved = true;
     state.sheetDraft = null;
+    state.sheetResult = { ok: true, text: "Checking the connection..." };
     draw();
+    // The check writes no row. Whatever it says, the code stays saved.
+    const kind = await checkSheetConnection(settings);
+    if (state.screen === "sheetSettings") {
+      state.sheetResult = { ok: kind === "connected", text: checkMessage(kind, sheetTabOf(self.GAMEDAY_CONFIG)) };
+      draw();
+    }
   }),
   openMenu: tap((gameId) => {
     state.topMenuOpen = false;

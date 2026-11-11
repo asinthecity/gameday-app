@@ -47,12 +47,36 @@ export function isBlank(text) {
 
 /** What the New game screen holds before anything is typed. `marked` lists fields showing Needed. */
 export function blankGameForm() {
-  return { date: "", kickOff: "", opposition: "", venue: "", rotationMinutes: ROTATION_MINUTES, marked: {} };
+  return { date: "", kickOff: "", opposition: "", venueTag: "", venue: "", rotationMinutes: ROTATION_MINUTES, marked: {} };
 }
 
-/** All four details are needed. There is no minimum squad size and no date check. */
+/**
+ * GDA-88: where the game is played. `venueTag` is one of these three (none chosen at first).
+ * `venue` on a game is now the optional "Field" text; games saved before GDA-88 keep their old
+ * venue text there and have no tag, so they need no migration.
+ */
+export const VENUE_TAGS = ["Home", "Away"];
+
+/** Date, kick-off, opposition and a Home / Away / Other choice are needed. Field is optional. */
 export function canCreateGame(form) {
-  return [form.date, form.kickOff, form.opposition, form.venue].every((detail) => !isBlank(detail));
+  return [form.date, form.kickOff, form.opposition].every((detail) => !isBlank(detail)) && VENUE_TAGS.includes(form.venueTag);
+}
+
+/** What the Home card shows where the venue used to be: "Away \u00b7 Field 3", "Away", or an older game's venue text. */
+export function venueLine(game) {
+  return [VENUE_TAGS.includes(game.venueTag) ? game.venueTag : "", cleanText(game.venue)].filter(Boolean).join(" \u00b7 ");
+}
+
+/** Copies a game with a new tag and/or Field text (the Game details sheet). Anything else is untouched. */
+export function withVenue(game, change) {
+  const next = { ...game };
+  if ("venueTag" in change && VENUE_TAGS.includes(change.venueTag)) {
+    next.venueTag = change.venueTag;
+  }
+  if ("venue" in change) {
+    next.venue = cleanText(change.venue);
+  }
+  return next;
 }
 
 /** A line-up with every place empty. Each call gives a separate one. */
@@ -89,6 +113,7 @@ export function newGame(form, id, createdOrder, squad, team = null) {
     date: form.date,
     kickOff: form.kickOff,
     opposition: cleanText(form.opposition),
+    venueTag: form.venueTag,
     venue: cleanText(form.venue),
     formation,
     halfMinutes,
@@ -833,6 +858,57 @@ export function swapped(game, at) {
 export function swapUndone(game, before) {
   const restored = withFirstHalf(game, { positions: before.lineups[lineupKey(before)].positions });
   return { ...restored, benchOrder: before.benchOrder, benchSince: before.benchSince, benchNumbers: before.benchNumbers ?? {}, benchTotals: before.benchTotals ?? {}, plannedPairs: before.plannedPairs ?? [] };
+}
+
+/**
+ * Can Ben change who is here (GDA-43)? Once the game has started, until Full Time.
+ * Before kick-off the line-up screen does it; after Full Time it is final.
+ */
+export function canChangeWhoIsHere(game) {
+  return game.state === FIRST_HALF || game.state === SECOND_HALF;
+}
+
+/**
+ * The picker's Done (GDA-43): which players need toggling so the game matches the draft.
+ * `hereIds` is the set of players ticked as here. Gives ids in squad order, only those that differ.
+ */
+export function hereDifferences(game, squadIds, hereIds) {
+  return squadIds.filter((id) => hereIds.has(id) === game.absent.includes(id));
+}
+
+/**
+ * One tap on a player in the Here / Not here list (GDA-43), during a game. `game.benchOrder`
+ * must already be complete (see withBenchOrder). Gives { game, changes } or null if not allowed.
+ * - Not here -> Here: end of the bench, bench timer from 0:00 at `at`, no turn counted.
+ * - Bench -> Not here: leaves the bench; the others keep their order and timers. The time on
+ *   the bench so far is kept in benchTotals, so it is not lost if they come back.
+ * - Pitch -> Not here: the position is left empty and nobody moves in. The leaving is logged as
+ *   a move to the bench (`changes`), so the record still counts the time they played.
+ * Tapping again reverses it. A leaver's planned swap line is dropped.
+ */
+export function hereToggled(game, playerId, at) {
+  if (!canChangeWhoIsHere(game)) {
+    return null;
+  }
+  if (game.absent.includes(playerId)) {
+    const benchSince = { ...game.benchSince, [playerId]: at };
+    const order = (game.benchOrder ?? []).filter((id) => id !== playerId);
+    return { game: { ...markedBackIn(game, playerId), benchOrder: [...order, playerId], benchSince }, changes: [] };
+  }
+  const place = activePositions(game).indexOf(playerId);
+  const onBench = (game.benchOrder ?? []).includes(playerId);
+  if (place === -1 && !onBench) {
+    return null;
+  }
+  const benchTotals = { ...game.benchTotals };
+  const benchSince = { ...game.benchSince };
+  if (onBench) {
+    benchTotals[playerId] = (benchTotals[playerId] ?? 0) + benchSeconds(game, playerId, at);
+    delete benchSince[playerId];
+  }
+  const away = pairRemoved(markedAbsent(game, playerId), playerId);
+  const gone = { ...away, plannedPairs: pairsOf(away).filter((pair) => pair.fieldId !== playerId), benchTotals, benchSince };
+  return { game: gone, changes: place === -1 ? [] : [{ playerId, from: place, to: BENCH }] };
 }
 
 /** The event log entry for a Swap: one event, one time, all the players who moved. */
