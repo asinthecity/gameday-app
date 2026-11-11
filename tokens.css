@@ -9,9 +9,11 @@
   --muted: #5B636D;
   --line: #E4E6EA;
   --outline: #C9CDD3;          /* outline of fields and white buttons */
+  --focus: #0A5C1E;            /* focus ring on text boxes (same green as --brand) */
   --brand: #0A5C1E;
   --brand-bright: #1E9E3A;     /* graphics only, never text */
   --alert: #FFE500;
+  --flash: #FFF6B8;            /* pale yellow flash on the score panel after a goal or undo; softer than --alert */
   --danger: #B00020;
   --pitch-a: #DDEBD5;
   --pitch-b: #E8F2E2;
@@ -66,6 +68,7 @@
   --s40: 40px;
   --s42: 42px;
   --s44: 44px;
+  --s46: 46px;
   --s48: 48px;
   --s52: 52px;
   --s53: 53px;

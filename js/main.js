@@ -12,7 +12,6 @@ import {
   canReorderBench,
   canTapLive,
   canAddGoal,
-  canRemoveLastGoal,
   lastGoal,
   THEM,
   US,
@@ -22,6 +21,8 @@ import {
   markedBackIn,
   movedOnto,
   lineUpMoved,
+  planMoved,
+  planView,
   needsPrePlacing,
   rotationOf,
   halfOf,
@@ -30,16 +31,21 @@ import {
   FINISHED,
   gameToResume,
   screenForOpening,
+  phaseOf,
+  backScreen,
+  nextScreen,
+  IN_PROGRESS_PHASE,
+  NOT_STARTED_PHASE,
   withRotation,
   withVenue,
   hereDifferences,
 } from "./game-rules.js";
-import { archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, startFirstHalf, startSecondHalf, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
+import { archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlan, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, reorderPlanBench, startFirstHalf, startSecondHalf, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
 import { canSend, checkMessage, parseSetupCode, SETTINGS_KEY, sheetTabOf } from "./sheet-rules.js";
 import { checkSheetConnection, sendGameToSheet } from "./sheet-send.js";
 import { shareCsv } from "./share-file.js";
 import { askToKeepDataOnce } from "./persistence.js";
-import { drawClock, drawLineUpActions, drawPairLines, drawPitch, drawScreen, setPhotos } from "./screens.js";
+import { drawClock, drawLineUpActions, drawPairLines, drawPitch, drawScreen, screenHalf, setPhotos, startScoreFlash } from "./screens.js";
 import { shrinkPhoto } from "./photo-image.js";
 import { PHOTO_PROBLEM } from "./photo-rules.js";
 import { loadPhotos, removePhoto, savePhoto } from "./photo-store.js";
@@ -51,7 +57,7 @@ import { rememberFirstTeamId, canSwitchTeams, cleanTeamForm, deleteRefusal, firs
 import { applyUpdate, currentUpdateNotice, startUpdates } from "./updates.js";
 
 const SAVE_PROBLEM = "That did not save. Please try again.";
-const FULL_TIME_PROBLEM = "Not saved. The game is still open. Tap FULL TIME to try again.";
+const FULL_TIME_PROBLEM = "Not saved. The game is still open. Tap End game and save to try again.";
 // After a screen change, ignore taps briefly, so the second half of a fast
 // double tap cannot land on whatever is now under the finger.
 const TAP_PAUSE_MS = 300;
@@ -78,9 +84,7 @@ const state = {
   hereDraft: null, // GDA-43: the Who is here picker's unsaved draft (a Set of player ids), or null when closed.
   rotationOpen: false, // The rotation stepper sheet on the ready and game screens.
   welcome: false, // The "Welcome back" banner after a restart. Never saved.
-  goalToast: null, // After a goal, for about 5 seconds: { goalId, text, until }. Never saved.
-  goalSheet: false, // The "Who scored?" sheet.
-  removeOpen: false, // The "Remove last goal?" confirm.
+  goalOpen: false, // The "Who scored?" dialog (GDA-90).
   undo: null, // After Swap, for about 5 seconds: { before, eventId, until }. Never saved.
   problem: "",
   fileProblemFor: null, // The finished game whose Save file just failed.
@@ -155,9 +159,7 @@ function goTo(screen) {
   state.hereDraft = null;
   state.selectedId = null;
   state.undo = null;
-  state.goalToast = null;
-  state.goalSheet = false;
-  state.removeOpen = false;
+  state.goalOpen = false;
   state.fileProblemFor = null;
   state.sheetResult = null;
   state.sheetDraft = null;
@@ -413,7 +415,7 @@ async function saveSwap() {
   setTimeout(() => {
     if (state.undo === shown) {
       state.undo = null;
-      if (state.screen === "game" && !presses.isActive()) {
+      if (isLiveScreen() && !presses.isActive()) {
         draw();
       }
     }
@@ -440,13 +442,12 @@ async function saveUndo() {
 }
 
 /**
- * A goal: saved first, shown after (the score is counted from the saved goals).
- * `scorerId` is a player id, or null for "Not sure" and for a goal against. The toast
- * with Undo then shows for about 5 seconds; it is taken off the page without a redraw.
+ * A goal: saved first, shown after (the score is counted from the saved goals). The dialog closes.
+ * `scorerId` is a player id, or null for a goal against and for "Own goal".
  */
 async function saveGoal(side, scorerId) {
   const game = openGame();
-  state.goalSheet = false;
+  state.goalOpen = false;
   if (!game || !canAddGoal(game)) {
     draw();
     return;
@@ -465,24 +466,14 @@ async function saveGoal(side, scorerId) {
   }
   saving = false;
   state.problem = "";
-  const name = state.players.find((player) => player.id === scorerId)?.name;
-  const text = side === THEM ? "Goal against" : `Goal: ${name ?? "Not sure"}`;
-  const shown = { goalId: goal.id, text, until: Date.now() + UNDO_MS };
-  state.goalToast = shown;
-  ignoreTapsUntil = Date.now() + TAP_PAUSE_MS; // The toast appears near the buttons: a double tap must not hit Undo.
+  ignoreTapsUntil = Date.now() + TAP_PAUSE_MS; // A double tap must not land on whatever is under the closed dialog.
+  startScoreFlash();
   draw();
-  setTimeout(() => {
-    if (state.goalToast === shown) {
-      state.goalToast = null;
-      document.getElementById("goalToast")?.remove();
-    }
-  }, UNDO_MS);
 }
 
-/** Undo (the toast) or Remove last goal (the confirm): saves the removal, then draws the corrected score. */
+/** Undo last goal: saves the removal, closes the dialog, then draws the corrected score. */
 async function saveGoalRemoval(goalId) {
-  state.goalToast = null;
-  state.removeOpen = false;
+  state.goalOpen = false;
   saving = true;
   try {
     await removeGoal(db, state.gameId, goalId);
@@ -496,6 +487,8 @@ async function saveGoalRemoval(goalId) {
   }
   saving = false;
   state.problem = "";
+  ignoreTapsUntil = Date.now() + TAP_PAUSE_MS; // A double tap on Undo removes one goal only.
+  startScoreFlash();
   draw();
 }
 
@@ -571,9 +564,18 @@ const actions = {
   openLineUp: tap((gameId) => openLineUp(gameId)),
   markAbsent: tap(() => saveSelectedPlayer(markedAbsent)),
   markBackIn: tap(() => saveSelectedPlayer(markedBackIn)),
-  readyForKickOff: tap(() => {
-    if (Date.now() >= ignoreReadyUntil) {
-      goTo("ready");
+  // The ‹ and › arrows (GDA-95). They only change which screen is shown: nothing is saved, and the
+  // clock, swap alert and bench timers (all worked out from saved times) carry on underneath.
+  goBack: tap(() => {
+    const to = backScreen(state.screen);
+    if (to) {
+      goTo(to);
+    }
+  }),
+  goNext: tap(() => {
+    const to = openGame() ? nextScreen(openGame(), state.screen) : null;
+    if (to) {
+      goTo(to);
     }
   }),
   openRotation: tap(() => {
@@ -607,7 +609,7 @@ const actions = {
   // GDA-22: a valid typed shape. Only before kick-off. Same places, so nobody moves. It is also the team's last-used shape.
   setFormation: (formation) => {
     const game = openGame();
-    if (!game || game.state !== NOT_STARTED || state.screen !== "lineUp") {
+    if (!game || game.state !== NOT_STARTED || state.screen !== "half1") {
       return;
     }
     state.games = state.games.map((g) => (g.id === game.id ? withFormation(g, formation) : g));
@@ -669,39 +671,31 @@ const actions = {
     }
     draw();
   }),
-  backToLineUp: tap(() => goTo("lineUp")),
-  startFirstHalf: tap(() => startGame()),
+  startFirstHalf: tap(() => {
+    // The button under a selected player is Absent / Back in, which pauses briefly after it changes (see saveSelectedPlayer).
+    if (Date.now() >= ignoreReadyUntil) {
+      startGame();
+    }
+  }),
   swap: tap(() => saveSwap()),
-  goalUs: tap(() => {
+  // GDA-90: the score header opens "Who scored?" while a half runs and at Half Time.
+  openGoalDialog: tap(() => {
     if (canAddGoal(openGame())) {
-      state.goalSheet = true;
+      state.goalOpen = true;
       draw();
     }
   }),
   chooseScorer: tap((playerId) => saveGoal(US, playerId)),
-  closeGoalSheet: tap(() => {
-    state.goalSheet = false;
+  closeGoalDialog: tap(() => {
+    state.goalOpen = false;
     draw();
   }),
   goalAgainst: tap(() => saveGoal(THEM, null)),
-  undoGoal: tap(() => state.goalToast && saveGoalRemoval(state.goalToast.goalId)),
-  openRemoveGoal: tap(() => {
-    if (canRemoveLastGoal(openGame())) {
-      state.removeOpen = true;
-      draw();
-    }
-  }),
-  closeRemoveGoal: tap(() => {
-    state.removeOpen = false;
-    draw();
-  }),
-  confirmRemoveGoal: tap(() => {
+  // GDA-91: removes the newest goal (either side); the dialog closes.
+  undoLastGoal: tap(() => {
     const goal = lastGoal(openGame());
-    if (goal && canRemoveLastGoal(openGame())) {
+    if (goal && canAddGoal(openGame())) {
       saveGoalRemoval(goal.id);
-    } else {
-      state.removeOpen = false;
-      draw();
     }
   }),
   undo: tap(() => saveUndo()),
@@ -709,11 +703,18 @@ const actions = {
     state.undo = null;
     saveThenShowLineUp(() => unplanPair(db, state.gameId, benchId));
   }),
-  // First half: opens Half Time. Second half: the temporary full-time screen (GDA-50).
-  endHalf: tap(() => saveThenGoTo(() => endHalf(db, state.gameId, Date.now()), openGame().state === "second half" ? "over" : "halfTime")),
-  // The back arrow on Half Time (throws the half-time changes away) or on the temporary full-time screen.
-  backToGame: tap(() => saveThenGoTo(() => reopenHalf(db, state.gameId, Date.now()), "game")),
-  startSecondHalf: tap(() => saveThenGoTo(() => startSecondHalf(db, state.gameId, Date.now()), "game")),
+  // End Half stays on the same screen, which now shows that half Ended. `half` is the half the screen
+  // shows: the save checks the saved game still agrees, so an out-of-date screen does nothing wrong.
+  endHalf: tap(() => {
+    const half = screenHalf(state.screen);
+    saveThenGoTo(() => endHalf(db, state.gameId, Date.now(), half), state.screen);
+  }),
+  // Resume half: the Ended half runs again (only while the next half has not started).
+  resumeHalf: tap(() => {
+    const half = screenHalf(state.screen);
+    saveThenGoTo(() => reopenHalf(db, state.gameId, Date.now(), half), state.screen);
+  }),
+  startSecondHalf: tap(() => saveThenGoTo(() => startSecondHalf(db, state.gameId, Date.now()), "half2")),
   fullTime: tap(async () => {
     const gameId = state.gameId;
     await saveThenGoTo(() => fullTime(db, gameId), "saved", FULL_TIME_PROBLEM);
@@ -865,20 +866,50 @@ const actions = {
   tryAgain: tap(() => window.location.reload()),
 };
 
+// Which way the circles on the current screen work (GDA-95):
+//   "live"  - a half In progress: plan a swap pair, move a field player, re-order the bench.
+//   "edit"  - the 1st half before kick-off.
+//   "plan"  - the 2nd half Not started (GDA-97): the 2nd-half plan, from before kick-off until Start 2nd half.
+//   null    - nothing to move (Ended halves).
+function circleMode() {
+  const half = screenHalf(state.screen);
+  const game = half === 0 ? null : openGame();
+  if (!game) {
+    return null;
+  }
+  const phase = phaseOf(game, half);
+  if (phase === IN_PROGRESS_PHASE) {
+    return "live";
+  }
+  if (phase !== NOT_STARTED_PHASE) {
+    return null;
+  }
+  return half === 1 ? "edit" : "plan";
+}
+const isLiveScreen = () => circleMode() === "live";
+
 // Taps and drags on the line-up's circles. See drag.js.
+// On the plan the rules run on the plan view (GDA-97), so they never touch the running half.
+const onPlan = () => circleMode() === "plan";
+const ruleGame = () => (onPlan() ? planView(openGame(), state.players) : openGame());
+const canMoveOnLineUp = (game, id, spot) => (onPlan() ? planMoved(openGame(), id, spot, state.players) !== null : lineUpMoved(game, id, spot, state.players) !== null);
+function saveEdit(playerId, spot) {
+  return onPlan() ? saveThenShowLineUp(() => movePlan(db, state.gameId, playerId, spot)) : saveMove(playerId, spot);
+}
+function saveEditBench(playerId, targetId) {
+  return onPlan() ? saveThenShowLineUp(() => reorderPlanBench(db, state.gameId, playerId, targetId)) : saveBenchMove(playerId, targetId);
+}
 const presses = watchLineUpPresses({
-  canPress: () => (state.screen === "lineUp" || state.screen === "halfTime" || state.screen === "game") && readyForTaps(),
-  canDrag: (spot) => canDrag(openGame(), spot),
+  canPress: () => circleMode() !== null && readyForTaps(),
+  canDrag: (spot) => canDrag(ruleGame(), spot),
   canDrop: (playerId, spot) =>
-    state.screen === "game"
-      ? liveAction(openGame(), playerId, spot) !== null
-      : lineUpMoved(openGame(), playerId, spot, state.players) !== null || canReorderBench(openGame(), playerId, spot.playerId),
+    isLiveScreen() ? liveAction(openGame(), playerId, spot) !== null : canMoveOnLineUp(openGame(), playerId, spot) || canReorderBench(ruleGame(), playerId, spot.playerId),
   tapped(spot) {
-    const live = state.screen === "game";
-    const outcome = live ? afterTap(openGame(), state.selectedId, spot, canTapLive) : afterTap(openGame(), state.selectedId, spot, (game, id, target) => lineUpMoved(game, id, target, state.players) !== null);
+    const live = isLiveScreen();
+    const outcome = live ? afterTap(openGame(), state.selectedId, spot, canTapLive) : afterTap(ruleGame(), state.selectedId, spot, canMoveOnLineUp);
     state.problem = "";
     if (outcome.move) {
-      live ? saveLive(state.selectedId, spot) : saveMove(state.selectedId, spot);
+      live ? saveLive(state.selectedId, spot) : saveEdit(state.selectedId, spot);
     } else {
       state.selectedId = outcome.selectedId;
       draw();
@@ -887,18 +918,18 @@ const presses = watchLineUpPresses({
   dragStarted() {
     state.selectedId = null;
     state.problem = "";
-    // The game screen is not redrawn here: that would remove the circle under the finger.
-    if (state.screen === "lineUp") {
+    // The live screen is not redrawn here: that would remove the circle under the finger.
+    if (state.screen === "half1" && !isLiveScreen()) {
       drawLineUpActions(state, actions);
     }
   },
   dropped(playerId, spot) {
-    if (state.screen === "game") {
+    if (isLiveScreen()) {
       spot ? saveLive(playerId, spot) : draw();
-    } else if (spot && canReorderBench(openGame(), playerId, spot.playerId)) {
-      saveBenchMove(playerId, spot.playerId);
+    } else if (spot && canReorderBench(ruleGame(), playerId, spot.playerId)) {
+      saveEditBench(playerId, spot.playerId);
     } else if (spot) {
-      saveMove(playerId, spot);
+      saveEdit(playerId, spot);
     } else {
       draw();
     }
@@ -917,7 +948,7 @@ function showWarning(show) {
   drawKeepingTypedName();
 }
 
-/** START 1ST HALF. The game screen appears only after the start time is safely saved. */
+/** Start 1st half. The running half appears only after the start time is safely saved. */
 async function startGame() {
   saving = true;
   try {
@@ -931,7 +962,7 @@ async function startGame() {
     return;
   }
   saving = false;
-  goTo("game");
+  goTo("half1");
 }
 
 /**
@@ -1015,8 +1046,8 @@ function onUpdateNews() {
 }
 
 /**
- * GDA-33: a game under way opens straight back into the game (or the half-over
- * screen if End Half was saved). Home and Squad are not shown until the game is
+ * GDA-33: a game under way opens straight back to the right screen for its saved state (GDA-95:
+ * 1st Half, 2nd Half or Full Time). Home and Squad are not shown until the game is
  * closed. A game whose saved data cannot be shown falls back to Home so Ben is
  * never stuck on a broken screen.
  */
@@ -1027,12 +1058,10 @@ function resumeGameIfAny() {
   }
   state.gameId = resume.game.id;
   state.screen = resume.screen;
-  if (resume.screen === "game") {
-    state.welcome = true;
-    // "Welcome back" goes after 5 seconds or at the first tap.
-    setTimeout(hideWelcome, WELCOME_MS);
-    document.addEventListener("pointerdown", hideWelcome, { once: true, capture: true });
-  }
+  state.welcome = true; // On every game screen a restart can open (GDA-33, GDA-95).
+  // "Welcome back" goes after 5 seconds or at the first tap.
+  setTimeout(hideWelcome, WELCOME_MS);
+  document.addEventListener("pointerdown", hideWelcome, { once: true, capture: true });
 }
 
 function hideWelcome() {
