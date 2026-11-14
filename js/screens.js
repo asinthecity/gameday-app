@@ -6,9 +6,9 @@
 
 import { hasRecord } from "./record-rules.js";
 import { trimmedLine } from "./drag.js";
-import { FINISHED, FIRST_HALF, SECOND_HALF, canPlan, IN_PROGRESS_PHASE, NOT_STARTED_PHASE, phaseOf, canStartHalf, canResumeHalf, halfLineUpView, nextScreen, lineupKey, canChangeWhoIsHere, startedAtOf, endedAtOf, canUndoKickOff, benchSeconds, benchTimerText, canCreateGame, VENUE_TAGS, venueLine, clockText, isBenchLate, ringFraction, planFigures, planFiguresFor, firstHalfFigures, firstHalfCopyOf, frozenRingLook, formatGameDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, benchNumberOf, rotationSecondsOf, rotationText, ROTATION_EXTRA_SECONDS, snappedSeconds, clampRotation, halfOf, carriesRotationOrder, carriesBenchTime, canChangeCarryOver, MIN_ROTATION, MAX_ROTATION, NOT_STARTED, scoreOf, canAddGoal, scorerChoices, undoLineOf, lastGoal, US, canEditNotes, noteOf, potdOf, summaryOf } from "./game-rules.js";
+import { FINISHED, FIRST_HALF, SECOND_HALF, canPlan, IN_PROGRESS_PHASE, NOT_STARTED_PHASE, phaseOf, canStartHalf, canResumeHalf, halfLineUpView, nextScreen, lineupKey, canChangeWhoIsHere, startedAtOf, endedAtOf, canUndoKickOff, formationRowHalf, shownFormation, benchSeconds, benchTimerText, canCreateGame, VENUE_TAGS, venueLine, clockText, isBenchLate, ringFraction, planFigures, planFiguresFor, firstHalfFigures, firstHalfCopyOf, frozenRingLook, formatGameDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, benchNumberOf, rotationSecondsOf, rotationText, ROTATION_EXTRA_SECONDS, snappedSeconds, clampRotation, halfOf, carriesRotationOrder, carriesBenchTime, canChangeCarryOver, MIN_ROTATION, MAX_ROTATION, NOT_STARTED, scoreOf, canAddGoal, scorerChoices, undoLineOf, lastGoal, US, canEditNotes, noteOf, potdOf, summaryOf } from "./game-rules.js";
 import { TALLY_COLUMNS, interchangeRows, sortTally, tallyRows } from "./interchange-rules.js";
-import { checkFormation, formatFormationDigits, pitchRows } from "./formation-rules.js";
+import { checkFormation, formatFormationDigits, formationOf, pitchRows } from "./formation-rules.js";
 import { archiveWarning, canDeleteGame, setupCodeOf, sheetStatus } from "./sheet-rules.js";
 import { canSaveName, initialsFor } from "./squad-rules.js";
 import { MIN_SIDE, MAX_SIDE, canSwitchTeams, deleteRefusal, deleteSummary, IN_PROGRESS_REFUSAL, LAST_TEAM_MESSAGE, LOCKED_MESSAGE, plural, UPGRADE_FAILED_MESSAGE } from "./team-rules.js";
@@ -282,6 +282,23 @@ function deleteSheet(state, actions) {
   );
 }
 
+/** The logo row of the team form (GDA-126): the picture or initials disc, Add / Replace / Remove logo. Like photoBlock. */
+function logoBlock(state, actions) {
+  const form = state.teamForm;
+  // form.logo: undefined = unchanged, a picture = chosen but not saved yet, null = removed.
+  const shown = form.logo !== undefined ? form.logo : form.mode === "edit" ? currentLogos[state.currentTeamId] : null;
+  const picker = h("input", { type: "file", accept: "image/*", id: "logoFile", hidden: true, onchange: () => actions.logoPicked(picker.files[0]) });
+  return h(
+    "div",
+    { class: "photoBlock" },
+    h("div", { class: "photoBig" }, teamLogo(form.values.name, shown, "bigLogo")),
+    h("button", { class: "btn", id: "logoBtn", onclick: () => picker.click() }, shown ? "Replace logo" : "Add logo"),
+    shown ? h("button", { class: "btn redtext", id: "logoRemove", onclick: actions.removeLogo }, "Remove logo") : null,
+    picker,
+    h("p", { class: "photoNote" }, "Stays on this phone only.")
+  );
+}
+
 /** Add team / Team settings (GDA-68): name, players per side, half length. */
 function teamFormScreen(state, actions) {
   const form = state.teamForm;
@@ -321,6 +338,7 @@ function teamFormScreen(state, actions) {
       h(
         "div",
         { class: "body" },
+        logoBlock(state, actions),
         setCard(
           field("teamName", "Team name", form.values.name, form.errors.name),
           numberRow("Players per side", "size", { less: "teamSizeLess", more: "teamSizeMore", value: "teamSize" }, MIN_SIDE, MAX_SIDE, (n) => String(n)),
@@ -449,7 +467,7 @@ function homeScreen(state, actions) {
   );
   return {
     nodes: [
-      header("Game Day", null, topMenu, null, h("img", { class: "homeCrest", src: "crest.png", alt: "", draggable: false })),
+      header("Game Day", null, topMenu, null, teamLogo(currentTeamOf(state)?.name ?? "", currentLogos[state.currentTeamId], "homeLogo")),
       h(
         "div",
         { class: "body" },
@@ -720,6 +738,8 @@ function createGameScreen(state, actions) {
               form.rotationExtraSeconds = snappedSeconds(seconds, form.rotationMinutes, form.halfMinutes);
             })
           ),
+          // GDA-127: the first game's shape, starting from the team's last-used one; never read-only here.
+          formationBox({ size: form.playersPerSide, shown: form.formation, disabled: false, onValid: (formation) => { form.formation = formation; } }),
           // GDA-22: the half length is the team's, fixed for this game. Shown so it is not a surprise.
           factRow("Half length", `${form.halfMinutes} min`, "halfInfo")
         ),
@@ -754,7 +774,8 @@ function newGameScreen(state, actions) {
             ? [factRow("Home or away", game.venueTag || "Not set", "ngVenueTag"), factRow("Field", game.venue || "Not set", "ngVenue")]
             : venueEditor(game, actions)),
           factRow("Rotation", rotationText(rotationSecondsOf(game)), "ngRotation"),
-          factRow("Half length", `${halfOf(game)} min`, "halfInfo")
+          factRow("Half length", `${halfOf(game)} min`, "halfInfo"),
+          formationRow(game, actions)
         ),
         carryOverSwitches(carryValuesOf(game), !canChangeCarryOver(game), actions)
       ),
@@ -898,12 +919,14 @@ function lineUpButton(view, state, actions) {
 }
 
 /** The pitch and bench, shared by the line-up and the before-kick-off screen. */
-function openRowsTight(game) {
-  return pitchRows(game.formation).length >= 5;
+function openRowsTight(shape) {
+  return pitchRows(shape).length >= 5;
 }
 function pitchAndBench(view, state, canMove, crowded, live = false, benchZone = false) {
   const game = openGame(state);
-  const tight = crowded || openRowsTight(game);
+  // GDA-127: the pitch draws the Formation of the half the screen shows.
+  const shape = formationOf(game, screenHalf(state.screen) || 1);
+  const tight = crowded || openRowsTight(shape);
   const dims = { size: tight ? CIRCLE_SIZES.pitchTight : CIRCLE_SIZES.pitch, weight: RING_WEIGHT };
   const line = (places) =>
     h(
@@ -915,7 +938,7 @@ function pitchAndBench(view, state, canMove, crowded, live = false, benchZone = 
       })
     );
   // GDA-22: one row per line of the game's shape, attack at the top and goal at the bottom.
-  const rows = pitchRows(game.formation);
+  const rows = pitchRows(shape);
   const pitch = h(
     "div",
     // Five or more rows need the smaller circles to fit.
@@ -952,7 +975,6 @@ function planBody(game, view, state, actions, { editable, firstHalf, note }) {
   return h(
     "div",
     { class: "lu" },
-    formationBox(game, actions, { locked: !firstHalf }),
     ...pitchAndBench(view, state, editable, crowded, false, editable && firstHalf),
     // GDA-62: always there, below the bench, even when empty (then slim). Only the 1st half's line-up can change who is absent.
     // 2nd half: no Absent row; leavers are marked through Who is here in Game details (GDA-99).
@@ -998,17 +1020,26 @@ function notStartedHalf(state, actions, half) {
 }
 
 /**
- * The formation box (GDA-22). Typing is checked at once against the game's team size
- * (its number of places): a valid shape is saved and the pitch redrawn in place; an
- * invalid one shows what is wrong and the pitch keeps the last valid shape. From
- * kick-off the box is disabled and says so. Only the box locks.
+ * The Formation row (GDA-22, GDA-127), in the New game screen's card and the cog's Game details. It edits the next
+ * half to be played (see formationRowHalf) and is read-only (disabled: no keypad) when there is none. Typing is checked
+ * at once against the team size (its number of places): a valid shape is saved; an invalid one gets a red outline and
+ * the last good shape stays saved.
  */
-function formationBox(game, actions, { locked = game.state !== NOT_STARTED } = {}) {
-  const size = game.lineups.firstHalf.positions.length;
+function formationRow(game, actions) {
+  return formationBox({
+    size: game.lineups.firstHalf.positions.length,
+    shown: shownFormation(game),
+    disabled: formationRowHalf(game) === null,
+    onValid: actions.setFormation,
+  });
+}
+
+/** The Formation box itself, used by the game rows above and by the Create game form (GDA-127). */
+function formationBox({ size, shown, disabled, onValid }) {
   const input = h("input", {
     id: "formation",
     type: "text", // text (not number) so the value can hold dashes
-    value: game.formation,
+    value: shown,
     // GDA-83: the number keypad (it has no "-", which GDA-71 hit); the box adds the dashes itself.
     inputmode: "numeric",
     autocomplete: "off",
@@ -1016,32 +1047,24 @@ function formationBox(game, actions, { locked = game.state !== NOT_STARTED } = {
     autocorrect: "off",
     spellcheck: "false",
     "aria-label": "Formation",
-    disabled: locked,
+    disabled,
   });
-  // The formation the pitch is showing now (the closed-over `game` goes stale as Ben types).
-  let shownOnPitch = game.formation;
+  // The shape last saved from this box (the closed-over `game` goes stale as Ben types).
+  let saved = shown;
   input.addEventListener("input", () => {
     // Show only the digits joined by dashes; setting the value puts the caret at the end.
-    const shown = formatFormationDigits(input.value);
-    if (input.value !== shown) {
-      input.value = shown;
+    const typed = formatFormationDigits(input.value);
+    if (input.value !== typed) {
+      input.value = typed;
     }
     const result = checkFormation(input.value, size);
     input.classList.toggle("bad", !result.ok);
-    if (result.ok && result.formation !== shownOnPitch) {
-      shownOnPitch = result.formation;
-      actions.setFormation(result.formation);
+    if (result.ok && result.formation !== saved) {
+      saved = result.formation;
+      onValid(result.formation);
     }
   });
-  return h("div", { class: "fm" }, h("label", { for: "formation" }, "Formation"), input);
-}
-
-/** Redraws only the pitch (line-up screen), so the formation box keeps its focus while typing. */
-export function drawPitch(state) {
-  const game = openGame(state);
-  const view = lineUpView(game, state.players);
-  const [pitch] = pitchAndBench(view, state, true, view.bench.length > 6 || view.absent.length > 6, false, true);
-  document.querySelector(".pitch")?.replaceWith(pitch);
+  return h("div", { class: "f" }, h("label", { for: "formation" }, "Formation"), input);
 }
 
 /** The settings cog (GDA-64): opens the Game details sheet. Sits at the far edge, away from the game buttons. */
@@ -1199,6 +1222,7 @@ function gameDetailsSheet(state, game, actions) {
       sheetHead("Game details", actions.closeRotation, "rotX"),
       setCard(
         h("div", { class: "setrow" }, h("span", {}, "Rotation length"), rotationPicker(clampRotation(game.rotationMinutes ?? 6, halfOf(game)), snappedSeconds(game.rotationExtraSeconds, clampRotation(game.rotationMinutes ?? 6, halfOf(game)), halfOf(game)), halfOf(game), actions.setRotation)),
+        formationRow(game, actions),
         hereRow(state, game, actions),
         interchangeRow(actions)
       ),
@@ -1226,11 +1250,21 @@ export function startScoreFlash() {
   scoreFlashAt = Date.now();
 }
 
-/** Our crest, or a grey disc with initials for a team with no crest (the opponent, for now). */
-function teamLogo(name, isUs) {
-  return isUs
-    ? h("img", { class: "logo", src: "crest.png", alt: "", draggable: false })
-    : h("span", { class: "logo disc", "aria-hidden": "true" }, initialsFor(name));
+/** A team's logo (GDA-126) if it has one, otherwise a grey disc with its initials (always the case for the opposition). */
+function teamLogo(name, logo, extraClass = "") {
+  return logo
+    ? h("img", { class: ("logo pic " + extraClass).trim(), src: logo, alt: "", draggable: false })
+    : h("span", { class: ("logo disc " + extraClass).trim(), "aria-hidden": "true" }, initialsFor(name));
+}
+
+function currentTeamOf(state) {
+  return state.teams.find((t) => t.id === state.currentTeamId);
+}
+
+// Team logos by team id, kept on this phone. main.js sets them before each draw (like setPhotos).
+let currentLogos = {};
+export function setLogos(logos) {
+  currentLogos = logos;
 }
 
 /**
@@ -1243,8 +1277,8 @@ function gameHeader(text, label, game, actions, state, arrows) {
   const score = scoreOf(game);
   const team = state.teams.find((t) => t.id === (game.teamId ?? state.currentTeamId));
   const usName = team?.name ?? "Us";
-  const row = (name, isUs, n, id) => h("span", { class: "trow" }, teamLogo(name, isUs), h("span", { class: "tn" }, name), h("span", { class: "tg", id }, String(n)));
-  const rows = [row(usName, true, score.us, "scoreUs"), row(game.opposition, false, score.them, "scoreThem")];
+  const row = (name, logo, n, id) => h("span", { class: "trow" }, teamLogo(name, logo), h("span", { class: "tn" }, name), h("span", { class: "tg", id }, String(n)));
+  const rows = [row(usName, currentLogos[team?.id], score.us, "scoreUs"), row(game.opposition, null, score.them, "scoreThem")];
   const teams = actions
     ? h("button", { ...scoreFlashProps("teams"), id: "score", "aria-label": `Score, ${usName} ${score.us}, ${game.opposition} ${score.them}. Tap to add or undo a goal`, onclick: actions.openGoalDialog }, ...rows)
     : h("div", { ...scoreFlashProps("teams"), id: "score" }, ...rows);

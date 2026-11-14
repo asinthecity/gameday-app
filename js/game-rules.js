@@ -4,7 +4,7 @@
 // text ("2026-11-14", "08:30"). They never pass through a time zone, so a game
 // cannot slip to the day before or after, whatever the phone's zone or region.
 
-import { placeCount, startingFormation } from "./formation-rules.js";
+import { fitsTeam, formationOf, placeCount, startingFormation } from "./formation-rules.js";
 
 // Fixed for now (J1-S5 is on the Later list). Stored on each game, so changing
 // them later leaves old games correct.
@@ -106,7 +106,8 @@ export function newGame(form, id, createdOrder, squad, team = null) {
   // GDA-22: the game takes the team's size, half length and starting shape, fixed for this game.
   // With no team given (older callers and tests) it is the old 9 a side, 3-3-2, 25 minutes.
   const halfMinutes = team?.halfMinutes ?? HALF_MINUTES;
-  const formation = team ? startingFormation(team) : FORMATION;
+  // GDA-127: a shape typed on the Create game form is used for both halves if it fits the team.
+  const formation = team ? (form.formation && fitsTeam(form.formation, team.playersPerSide) ? form.formation : startingFormation(team)) : FORMATION;
   const game = {
     id,
     createdOrder,
@@ -601,9 +602,32 @@ export function halfOf(game) {
   return game?.halfMinutes ?? HALF_MINUTES;
 }
 
-/** Copies a game with a different formation. Only the grouping changes: the same places, so nobody moves. */
+/**
+ * GDA-127: which half the Formation row edits (the next half to be played), or null when it is read-only.
+ * Before kick-off: the 1st half. After kick-off until the 2nd half starts (1st half running or half time): the 2nd half.
+ * 2nd half running or Full Time: none.
+ */
+export function formationRowHalf(game) {
+  return game.state === NOT_STARTED ? 1 : game.state === FIRST_HALF ? 2 : null;
+}
+
+/** The Formation the row shows: the half it edits, or (read-only) the current half's. */
+export function shownFormation(game) {
+  return formationOf(game, formationRowHalf(game) ?? 2);
+}
+
+/**
+ * Copies a game with a different formation for the half the row edits. Only the grouping changes: the same places,
+ * so nobody moves. Before kick-off it sets the 1st half's (the 2nd half's follows unless it was set separately).
+ * From kick-off it sets the 2nd half's only, always stored on its own so it stays even if equal to the 1st's.
+ * A game where the row is read-only comes back unchanged (a stale screen).
+ */
 export function withFormation(game, formation) {
-  return { ...game, formation };
+  const half = formationRowHalf(game);
+  if (half === null) {
+    return game;
+  }
+  return half === 1 ? { ...game, formation } : { ...game, formation2: formation };
 }
 
 /**
@@ -867,7 +891,9 @@ export function undoneKickOff(game, half) {
   const saved = game.atKickOff[HALF_KEYS[half]];
   if (half === 1) {
     // The plan and the GDA-86 switches are Ben's choices, not things that happened, so they stay as they are now.
-    return { ...saved, carryRotationOrder: game.carryRotationOrder, carryBenchTime: game.carryBenchTime, lineups: { ...saved.lineups, secondHalf: game.lineups.secondHalf } };
+    // GDA-127: the 2nd half's Formation is the same kind of choice, so it is kept too.
+    const second = game.formation2 ? { formation2: game.formation2 } : {};
+    return { ...saved, ...second, carryRotationOrder: game.carryRotationOrder, carryBenchTime: game.carryBenchTime, lineups: { ...saved.lineups, secondHalf: game.lineups.secondHalf } };
   }
   // Keep the 1st half's own copy, so the game is exactly as before the 2nd half started.
   return game.atKickOff.firstHalf ? { ...saved, atKickOff: { firstHalf: game.atKickOff.firstHalf } } : saved;
