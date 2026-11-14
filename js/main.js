@@ -4,6 +4,8 @@
 
 import { getMeta, openDatabase } from "./db.js";
 import { watchLineUpPresses } from "./drag.js";
+import { sortAfterTap } from "./interchange-rules.js";
+import { NO_SWIPE_START, POPUP_OPEN, swipeOf } from "./swipe-rules.js";
 import {
   afterTap,
   blankGameForm,
@@ -49,7 +51,7 @@ import {
   hereDifferences,
   pairsOf,
 } from "./game-rules.js";
-import { archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlan, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, reorderPlanBench, startFirstHalf, startSecondHalf, undoKickOff, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
+import { loadGameEvents, archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlan, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, reorderPlanBench, startFirstHalf, startSecondHalf, undoKickOff, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
 import { canSend, checkMessage, parseSetupCode, SETTINGS_KEY, sheetTabOf } from "./sheet-rules.js";
 import { checkSheetConnection, sendGameToSheet } from "./sheet-send.js";
 import { shareCsv } from "./share-file.js";
@@ -96,6 +98,9 @@ const state = {
   rotationOpen: false, // The rotation stepper sheet on the ready and game screens.
   welcome: false, // The "Welcome back" banner after a restart. Never saved.
   goalOpen: false, // The "Who scored?" dialog (GDA-90).
+  interchange: null, // GDA-121: { events } read when Interchange history opens. Never saved.
+  interchangeBack: null, // The screen Interchange history returns to. Never saved.
+  tallySort: { column: "name", descending: false }, // The bench time table's sort. Not remembered.
   summaryBack: null, // The game screen the mid-game Summary returns to (GDA-108). Never saved.
   noteFor: null, // The player whose hold sheet is open (GDA-81), or null. Never saved.
   noteDraft: null, // What is typed in the note box, until Done (null = not typed yet). Never saved.
@@ -797,6 +802,26 @@ const actions = {
     goTo("summary");
   }),
   closeSummary: tap(() => goTo(state.summaryBack ?? "half1")),
+  // GDA-121: Interchange history. Reads the saved swaps once when it opens; nothing is saved. Back returns to the screen it came from.
+  openInterchange: tap(async () => {
+    const id = state.viewId ?? state.gameId;
+    try {
+      const events = await loadGameEvents(db, id);
+      state.interchangeBack = state.screen;
+      state.interchange = { events };
+      state.tallySort = { column: "name", descending: false };
+      goTo("interchange");
+    } catch (error) {
+      console.warn("Could not read the swaps", error);
+      state.problem = "Could not open the interchange history. Try again.";
+      draw();
+    }
+  }),
+  closeInterchange: tap(() => goTo(state.interchangeBack ?? "half1")),
+  sortTally: tap((column) => {
+    state.tallySort = sortAfterTap(state.tallySort, column);
+    draw();
+  }),
   // GDA-81: the hold sheet. The note is saved when Done is tapped (typing alone changes nothing stored).
   noteTyped: (text) => {
     state.noteDraft = text;
@@ -1255,5 +1280,43 @@ document.addEventListener("visibilitychange", () => drawClock(state));
 window.addEventListener("pageshow", () => drawClock(state));
 // GDA-80: the planned-swap lines follow the circles when the window changes size or turns.
 window.addEventListener("resize", () => drawPairLines(state));
+
+// GDA-122: swipe left or right to move between the game screens, exactly as the › and ‹ arrows do.
+// Decided when the finger lifts. Touch events (not pointer events) so it never interferes with drag.js,
+// which owns every press that starts on a circle. A swipe saves nothing: it calls the same actions as the arrows.
+const SWIPE_SCREENS = ["newGame", "half1", "half2", "fullTime"];
+let swipeStart = null; // Where the one finger went down, or null when this touch cannot be a swipe.
+document.addEventListener("touchstart", (event) => {
+  const blocked = event.touches.length !== 1 || !SWIPE_SCREENS.includes(state.screen) || event.target.closest(NO_SWIPE_START) || document.querySelector(POPUP_OPEN);
+  swipeStart = blocked ? null : { x: event.touches[0].clientX, y: event.touches[0].clientY };
+}, { passive: true });
+document.addEventListener("touchmove", (event) => {
+  if (event.touches.length > 1) {
+    swipeStart = null; // A second finger joined: not a swipe.
+  }
+}, { passive: true });
+document.addEventListener("touchcancel", () => { swipeStart = null; }, { passive: true });
+document.addEventListener("touchend", (event) => {
+  const from = swipeStart;
+  swipeStart = null;
+  const lift = event.changedTouches[0];
+  const way = from && event.touches.length === 0 && !presses.isActive() && !document.querySelector(POPUP_OPEN) ? swipeOf(lift.clientX - from.x, lift.clientY - from.y) : null;
+  if (!way) {
+    return;
+  }
+  const before = state.screen;
+  if (way === "next") {
+    actions.goNext();
+  } else {
+    actions.goBack();
+  }
+  if (state.screen !== before) {
+    // Slide the new screen in from the side the finger moved towards. Restarting the animation needs a reflow.
+    const screen = document.getElementById("screen");
+    screen.classList.remove("slideFromRight", "slideFromLeft");
+    void screen.offsetWidth;
+    screen.classList.add(way === "next" ? "slideFromRight" : "slideFromLeft");
+  }
+}, { passive: true });
 
 start();
