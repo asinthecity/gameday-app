@@ -20,7 +20,13 @@ const ICONS = {
   // Back arrow (GDA-75) and End half flag.
   back: ["M15 5l-7 7 7 7"],
   next: ["M9 5l7 7-7 7"],
+  close: ["M6 6l12 12", "M18 6L6 18"], // GDA-149: Close game on a finished game's Full Time page
   flag: ["M6 21V4", "M6 5h11l-2.5 4 2.5 4H6"],
+  // Start triangle and Stop square on the head bar chip (GDA-120). "F " paths are filled.
+  play: ["F M8 5l11 7-11 7z"],
+  stop: ["F M6 6h12v12H6z"],
+  // Undo arrow (GDA-125): the swap pill after a swap.
+  undo: ["M9 14L4 9l5-5", "M4 9h10a6 6 0 0 1 0 12h-3"],
   // Goalkeeper glove (GDA-85): three fingers, a thumb and a cuff.
   // Football (GDA-108): a circle with a centre patch and seam lines.
   // A path starting with "F " is filled (the solid centre patch makes it read as a ball, not a wheel, at text size).
@@ -59,6 +65,12 @@ function h(tag, props = {}, ...children) {
 function header(title, onBack, right = null, extra = null, crest = null) {
   const back = onBack ? h("button", { class: "back", "aria-label": "Back", onclick: onBack }, icon("back")) : null;
   return h("div", { class: "hdr" }, back, crest, h("h1", {}, title), right, extra);
+}
+
+/** The title sits in the middle of the band (Interchange history, GDA-135). */
+function centredHeader(bar) {
+  bar.classList.add("mid");
+  return bar;
 }
 
 function problemLine(text) {
@@ -113,10 +125,18 @@ function arrowButton(kind, onClick) {
 }
 
 /** The arrows for a game screen: Back always works; Next works where the rules say there is a screen to go to. */
-function navArrows(state, actions) {
+function navArrows(state, actions, nextGo = false) {
   const game = openGame(state);
   const hasNext = state.screen === "createGame" ? true : !!game && nextScreen(game, state.screen) !== null;
-  return [arrowButton("back", actions.goBack), arrowButton("next", hasNext ? actions.goNext : null)];
+  let next = arrowButton("next", hasNext ? actions.goNext : null);
+  if (state.screen === "fullTime" && state.viewId) {
+    // GDA-149: a finished game looked at from Home: the inactive next arrow becomes Close game (same 44px slot).
+    next = h("button", { class: "arrow", id: "closeGameTop", "aria-label": "Close game", onclick: actions.closeGame }, icon("close"));
+  }
+  if (nextGo) {
+    next.classList.add("go"); // GDA-120: at Half Time the next arrow is the solid dark "go" style
+  }
+  return [arrowButton("back", actions.goBack), next];
 }
 
 /** The top row of a screen with no clock: arrow, title (and a small state tag), arrow. Same box as the game header card. */
@@ -166,6 +186,12 @@ function cardMenu(game, state, actions, items) {
   );
 }
 
+/** GDA-148: Planned / In progress / Completed, worked out from the saved game each time Home is drawn (never stored). */
+function statusTag(game) {
+  const label = game.record ? "Completed" : game.state === NOT_STARTED ? "Planned" : "In progress";
+  return h("span", { class: "tag status", "data-status-tag": label }, label);
+}
+
 function gameCard(game, state, actions) {
   // Only a game not started has a menu (Delete). A game in progress has none.
   const hasMenu = canDeleteGame(game);
@@ -175,7 +201,7 @@ function gameCard(game, state, actions) {
     h(
       "div",
       { class: "head" },
-      h("div", { class: "info" }, h("b", {}, `vs ${game.opposition}`), h("div", {}, `${formatGameDate(game.date)} \u00b7 ${formatKickOff(game.kickOff)}`), h("div", {}, venueLine(game))),
+      h("div", { class: "info" }, h("div", { class: "nameRow" }, h("b", {}, `vs ${game.opposition}`), statusTag(game)), h("div", {}, `${formatGameDate(game.date)} \u00b7 ${formatKickOff(game.kickOff)}`), h("div", {}, venueLine(game))),
       hasMenu ? h("div", { class: "menuwrap" }, menuButton(game, actions)) : null
     ),
     hasMenu
@@ -224,7 +250,7 @@ function finishedCard(game, state, actions) {
     h(
       "div",
       { class: "head" },
-      h("div", { class: "info" }, h("b", {}, `vs ${game.opposition} \u00b7 ${game.record.us} - ${game.record.them}`), h("div", {}, formatGameDate(game.date))),
+      h("div", { class: "info" }, h("div", { class: "nameRow" }, h("b", {}, `vs ${game.opposition} \u00b7 ${game.record.us} - ${game.record.them}`), statusTag(game)), h("div", {}, formatGameDate(game.date))),
       h("div", { class: "menuwrap" }, menuButton(game, actions))
     ),
     cardMenu(game, state, actions, [
@@ -384,7 +410,7 @@ function sheetSettingsScreen(state, actions) {
   const field = (id, label, value, type) => {
     const input = h("input", { id, type, autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false" });
     input.value = value ?? "";
-    return h("div", { class: "f" }, h("label", { for: id }, h("span", {}, label)), input);
+    return h("div", { class: "f wide" }, h("label", { for: id }, h("span", {}, label)), input);
   };
   return {
     nodes: [
@@ -405,15 +431,16 @@ function sheetSettingsScreen(state, actions) {
 /** The current team's name and size under the Game Day heading (cut short if very long). */
 function teamLine(state) {
   const team = state.teams.find((t) => t.id === state.currentTeamId);
-  return team ? h("p", { class: "team", id: "teamLine" }, h("b", {}, team.name), ` \u00b7 ${team.playersPerSide} a side`) : null;
+  return team ? h("p", { class: "team", id: "teamLine" }, h("b", {}, team.name), h("span", { class: "tsize" }, ` \u00b7 ${team.playersPerSide} a side`)) : null;
 }
 
 /** The team list at the top of the menu: tick on the current team, locked while a game is in progress. */
 function teamMenuItems(state, actions) {
   const locked = !canSwitchTeams(state.games);
   const items = state.teams.map((team) => {
-    const label = (team.id === state.currentTeamId ? "\u2713 " : "\u00a0\u00a0\u00a0 ") + team.name;
-    return h("button", { class: "mi teamItem", "data-team": team.id, disabled: locked, onclick: () => actions.switchTeam(team.id) }, label);
+    // The tick (violet) goes before the current team; the others get blank space of the same width so names line up.
+    const mark = team.id === state.currentTeamId ? h("span", { class: "tickMark" }, "\u2713") : "\u00a0\u00a0\u00a0";
+    return h("button", { class: "mi teamItem", "data-team": team.id, disabled: locked, onclick: () => actions.switchTeam(team.id) }, mark, " " + team.name);
   });
   return [
     h("div", { class: "mhd" }, "Teams"),
@@ -467,11 +494,16 @@ function homeScreen(state, actions) {
   );
   return {
     nodes: [
-      header("Game Day", null, topMenu, null, teamLogo(currentTeamOf(state)?.name ?? "", currentLogos[state.currentTeamId], "homeLogo")),
+      // Home's band (GDA-131): logo (or initials disc), Game Day and the menu button, with the team line under them.
+      h(
+        "div",
+        { class: "hdr homeHdr" },
+        h("div", { class: "hrow" }, teamLogo(currentTeamOf(state)?.name ?? "", currentLogos[state.currentTeamId], "homeLogo"), h("h1", {}, "Game Day"), topMenu),
+        teamLine(state)
+      ),
       h(
         "div",
         { class: "body" },
-        teamLine(state),
         updateCard(state.updateNotice, actions),
         problemLine(state.problem),
         createButton,
@@ -701,8 +733,7 @@ function createGameScreen(state, actions) {
     { class: "btn pri big", id: "make", disabled: !canCreateGame(form), onclick: actions.makeGame },
     "Create game"
   );
-  // GDA-96: says why Create game is greyed out until Home or Away is picked.
-  const venueHint = h("div", { class: "hint", id: "venueHint", hidden: form.venueTag !== "" }, "Pick Home or Away to create the game");
+  // GDA-134: no hint under the form (Ben, 2026-11-14); Create game is simply greyed out until Home or Away is picked.
   // The › arrow does what Create game does, so it is greyed out in the same cases.
   const nextArrow = arrowButton("next", actions.makeGame);
   const syncNext = () => {
@@ -712,7 +743,6 @@ function createGameScreen(state, actions) {
   };
   const onChange = () => {
     make.disabled = !canCreateGame(form);
-    venueHint.hidden = form.venueTag !== "";
     syncNext();
   };
   syncNext();
@@ -743,7 +773,6 @@ function createGameScreen(state, actions) {
           // GDA-22: the half length is the team's, fixed for this game. Shown so it is not a surprise.
           factRow("Half length", `${form.halfMinutes} min`, "halfInfo")
         ),
-        venueHint,
         carryOverSwitches(form, false, actions),
         form.rotationNote ? h("div", { class: "ro", id: "rotNote" }, form.rotationNote) : null,
         make,
@@ -761,7 +790,7 @@ function newGameScreen(state, actions) {
   const game = openGame(state);
   return {
     nodes: [
-      navBar("New game", null, state, actions),
+      navBar(gameHasKickedOff(game) ? "Game details" : "New game", null, state, actions),
       h(
         "div",
         { class: "body" },
@@ -808,7 +837,7 @@ function playerSlot(player, state, canMove, isKeeper = false, benchTimer = false
   // by where the player is on the plan now.
   const figures = afterHalf ? firstHalfFigures(openGame(state)) : screenHalf(state.screen) === 2 && started ? planFigures(openGame(state), Date.now()) : null;
   const shown = figures ? planFiguresFor(figures, player.id, onPitch) : null;
-  const liveStints = onPitch && started && (screenHalf(state.screen) === 2) === (lineupKey(openGame(state)) === "secondHalf") ? openGame(state).benchStints?.[player.id] : undefined; // (with Carry over bench time ON these already include the 1st half's, GDA-116)
+  const liveStints = started && (screenHalf(state.screen) === 2) === (lineupKey(openGame(state)) === "secondHalf") ? openGame(state).benchStints?.[player.id] : undefined; // (with Carry over bench time ON these already include the 1st half's, GDA-116). GDA-145: bench circles show them too.
   const stints = shown ? (shown.rings.length > 0 ? shown.rings : undefined) : liveStints;
   const frozen = stints ? frozenRings(stints, rotationSecondsOf(openGame(state)), dims) : null;
   // Plan bench: the existing bench ring, filled to the spell running at the whistle, and the .tm tag (none if not on the bench then).
@@ -816,9 +845,11 @@ function playerSlot(player, state, canMove, isKeeper = false, benchTimer = false
   // GDA-116: the 1st half's bench circles are drawn as it ended and do not tick (no data-plan-bench, so drawBenchTimers leaves them).
   const rotation = rotationSecondsOf(openGame(state));
   // Room for the rings above and below the circle so they never cover the name (one ring step is weight + 1px gap).
+  // GDA-145: on the bench the live ring is drawn outside the frozen ones, one step further out for each.
+  const ringsDrawn = stints ? Math.min(stints.length, MAX_FROZEN_RINGS) : 0;
   const frozenSpace = stints ? Math.min(stints.length, MAX_FROZEN_RINGS) * (dims.weight + 1) : 0;
   // A planned swap: OFF and ON tags on the circles (GDA-75), and a dotted line between them (GDA-80, drawPairLines).
-  const planTag = plannedOff ? h("span", { class: "pt" }, "OFF") : plannedOn ? h("span", { class: "pt" }, "ON") : null;
+  const planTag = plannedOff ? h("span", { class: "pt" }, "OFF") : plannedOn ? h("span", { class: "pt on" }, "ON") : null;
   // The keeper is shown by the glove badge on the circle alone (GDA-99: no "GK" text after the name).
   const nameLine = h("div", { class: "nm" }, player.name);
   return h(
@@ -830,7 +861,7 @@ function playerSlot(player, state, canMove, isKeeper = false, benchTimer = false
       ...(planBench && !afterHalf ? { "data-plan-bench": player.id } : {}), // GDA-107: the plan's bench circles move with the 1st half
       ...(benchTimer ? { "data-bench": player.id } : {}), // Marks a timer circle; it is not draggable.
     },
-    h("div", { class: "ci", ...(frozen ? { style: `margin: ${frozenSpace}px 0` } : {}) }, avatar(player), benchTimer && !afterHalf ? ring(dims) : planBench || (afterHalf && benchTimer) ? ring(dims, !shown || shown.seconds === null ? 0 : ringFraction(shown.seconds, rotation)) : null, frozen, isKeeper || openGame(state).keeperTurns?.includes(player.id) ? h("span", { class: "gkb", "aria-hidden": "true" }, icon("glove")) : null, turnMark, planTag, benchTimer && !afterHalf ? h("div", { class: "tm" }) : planBench && shown.seconds !== null ? h("div", { class: "tm" }, benchTimerText(shown.seconds)) : null), // Bench time: a small tag at the circle's bottom-right; drawBenchTimers fills it.
+    h("div", { class: "ci", ...(frozen && !benchTimer ? { style: `margin: ${frozenSpace}px 0` } : {}) }, avatar(player), benchTimer && !afterHalf ? ring(dims, 0, ringsDrawn) : planBench || (afterHalf && benchTimer) ? ring(dims, !shown || shown.seconds === null ? 0 : ringFraction(shown.seconds, rotation), ringsDrawn) : null, frozen, isKeeper || openGame(state).keeperTurns?.includes(player.id) ? h("span", { class: "gkb", "aria-hidden": "true" }, icon("glove")) : null, turnMark, planTag, benchTimer && !afterHalf ? h("div", { class: "tm" }) : planBench && shown.seconds !== null ? h("div", { class: "tm" }, benchTimerText(shown.seconds)) : null), // Bench time: a small tag at the circle's bottom-right; drawBenchTimers fills it.
     nameLine
   );
 }
@@ -851,13 +882,13 @@ const CIRCLE_SIZES = {
   get pitch() { return circleSize("--circle-pitch", 50); },
   get pitchTight() { return circleSize("--circle-pitch-tight", 40); },
   get bench() { return circleSize("--circle-bench", 44); },
-  get benchMany() { return circleSize("--circle-bench-many", 38); },
+  get benchMany() { return circleSize("--circle-bench-many", 36); },
 };
-function ringCircles(dims, arcs, className) {
+function ringCircles(dims, arcs, className, firstSlot = 0) {
   const { size, weight } = dims;
   let out = "";
   arcs.forEach((arc, i) => {
-    const r = size / 2 + 2 + weight / 2 + i * (weight + 1);
+    const r = size / 2 + 2 + weight / 2 + (firstSlot + i) * (weight + 1);
     const length = 2 * Math.PI * r;
     const dash = `${(arc.fraction * length).toFixed(1)} ${length.toFixed(1)}`;
     out +=
@@ -868,10 +899,10 @@ function ringCircles(dims, arcs, className) {
 }
 
 /** The ring round a bench circle. Its fill is set by drawBenchTimers, not here. */
-function ring(dims, fraction = 0) {
+function ring(dims, fraction = 0, firstSlot = 0) {
   // Parsed as HTML so the browser puts the SVG parts in the right namespace.
   const holder = document.createElement("div");
-  holder.innerHTML = ringCircles(dims, [{ fraction, late: false }], "rg");
+  holder.innerHTML = ringCircles(dims, [{ fraction, late: false }], "rg", firstSlot);
   return holder.firstChild;
 }
 
@@ -896,7 +927,7 @@ function emptySlot(place, canMove, state) {
     "div",
     { class: planned ? "slot plan" : "slot", ...(canMove ? { "data-place": place } : {}) },
     h("div", { class: "ci" }, h("div", { class: "av em" })),
-    h("div", { class: "nm" }, "\u00a0")
+    h("div", { class: "nm none" }, "\u00a0") // GDA-139: keeps the height, shows no plate
   );
 }
 
@@ -904,25 +935,24 @@ function lineUpRow(title, rowClass, players, state, canMove, benchTimers = false
   // Circle size and ring weight (GDA-85): a crowded live bench has smaller circles and thinner rings.
   const dims = { size: rowClass.includes("many") ? CIRCLE_SIZES.benchMany : CIRCLE_SIZES.bench, weight: RING_WEIGHT };
   const slots = players.map((player) => playerSlot(player, state, canMove, false, benchTimers, false, dims));
+  // An empty BENCH row keeps its normal height (Ben, 2026-11-14): one invisible stand-in slot, built like a real one,
+  // so the row measures the same with or without players. It carries no player id, so it can't be dragged or tapped.
+  if (title === "BENCH" && slots.length === 0) {
+    const ghost = playerSlot({ id: "", name: "Bench" }, state, false, false, false, false, dims);
+    ghost.removeAttribute("data-player");
+    ghost.classList.add("ghost");
+    ghost.setAttribute("aria-hidden", "true");
+    slots.push(ghost);
+  }
   // `zone` makes the whole row a drop target (GDA-62): "absent" or "bench", line-up screen only.
   return h("div", { class: rowClass, ...(rowClass.includes("live") ? { style: `--subs: ${Math.max(players.length, 4)}` } : {}), ...(zone ? { "data-zone": zone } : {}) }, h("span", { class: "t" }, title), ...slots);
-}
-
-/** The 1st Half (Not started) main button: Start 1st half. While a player is selected it acts on them instead. */
-function lineUpButton(view, state, actions) {
-  if (state.selectedId === null) {
-    return h("button", { class: "btn pri main", id: "startFirst", onclick: actions.startFirstHalf }, "Start 1st half");
-  }
-  return view.absent.some((player) => player.id === state.selectedId)
-    ? h("button", { class: "btn pri main", onclick: actions.markBackIn }, "Back in")
-    : h("button", { class: "btn pri main", onclick: actions.markAbsent }, "Absent");
 }
 
 /** The pitch and bench, shared by the line-up and the before-kick-off screen. */
 function openRowsTight(shape) {
   return pitchRows(shape).length >= 5;
 }
-function pitchAndBench(view, state, canMove, crowded, live = false, benchZone = false) {
+function pitchAndBench(view, state, canMove, crowded, live = false, benchZone = false, overlay = null, actions = null) {
   const game = openGame(state);
   // GDA-127: the pitch draws the Formation of the half the screen shows.
   const shape = formationOf(game, screenHalf(state.screen) || 1);
@@ -942,17 +972,19 @@ function pitchAndBench(view, state, canMove, crowded, live = false, benchZone = 
   const pitch = h(
     "div",
     // Five or more rows need the smaller circles to fit.
-    { class: tight ? "pitch tight" : "pitch", style: `grid-template-rows: repeat(${rows.length}, minmax(0, 1fr))` },
-    ...rows.map(line)
+    { class: (tight ? "pitch tight" : "pitch") + (overlay ? " pilled" : "") + (actions ? " cogged" : ""), style: `grid-template-rows: repeat(${rows.length}, minmax(0, 1fr))` },
+    ...rows.map(line),
+    overlay, // GDA-125: the swap pill sits inside the pitch's bottom-right corner (live half only)
+    actions ? settingsButton(actions) : null // GDA-120: Settings mirrors it in the bottom-left corner
   );
   if (live) {
-    // Game under way: bench circles carry timers; nobody on the bench means no bench row.
+    // Game under way: bench circles carry timers. The row stays when nobody is on the bench, so nothing moves (Ben, 2026-11-14).
     const rowClass = view.bench.length > 6 ? "row live many" : "row live";
-    return view.bench.length > 0 ? [pitch, lineUpRow("BENCH", rowClass, view.bench, state, canMove, true)] : [pitch];
+    return [pitch, lineUpRow("BENCH", rowClass, view.bench, state, canMove, true)];
   }
   // GDA-107: the 2nd Half plan at half time carries the bench ring and tag, so its bench row is drawn the way the live one is.
   const atHalfTime = screenHalf(state.screen) === 2 && planFigures(game, 0) !== null;
-  const benchClass = atHalfTime ? (view.bench.length > 6 ? "row live many" : "row live") : "row";
+  const benchClass = atHalfTime ? (view.bench.length > 6 ? "row live many" : "row live") : view.bench.length > 6 ? "row many" : "row"; // GDA-134: 7 or more subs share one row
   return [pitch, lineUpRow("BENCH", benchClass, view.bench, state, canMove, false, benchZone ? "bench" : null)];
 }
 
@@ -961,61 +993,61 @@ function openGame(state) {
   return state.games.find((candidate) => candidate.id === (state.viewId ?? state.gameId));
 }
 
-/** The bottom row of every half screen (GDA-95): the main button, always in the same spot, then the cog. */
-function bottomRow(state, actions, main) {
-  return [problemLine(state.problem), h("div", { class: "gr" }, main, cogButton(actions, "bot", state))].filter(Boolean);
-}
-function bottomBar(state, actions, main) {
-  return h("div", { class: "acts game" }, ...bottomRow(state, actions, main));
+/**
+ * The row under the pitch (GDA-120). The Start / End Half / Resume half button and the cog have moved to the head bar and
+ * the pitch, so this row is normally empty (and takes no room). It only holds an error message.
+ */
+function bottomBar(state, actions) {
+  return h("div", { class: "acts game" }, problemLine(state.problem));
 }
 
 /** The pitch, bench and ABSENT row of a half that is Not started. `editable` false shows them for looking only. */
-function planBody(game, view, state, actions, { editable, firstHalf, note }) {
+function planBody(game, view, state, actions, { editable, firstHalf, note, overlay = null }) {
   const crowded = view.bench.length > 6 || view.absent.length > 6;
   return h(
     "div",
-    { class: "lu" },
-    ...pitchAndBench(view, state, editable, crowded, false, editable && firstHalf),
+    { class: "lu setup" },
+    ...pitchAndBench(view, state, editable, crowded, false, editable && firstHalf, overlay, actions),
     // GDA-62: always there, below the bench, even when empty (then slim). Only the 1st half's line-up can change who is absent.
     // 2nd half: no Absent row; leavers are marked through Who is here in Game details (GDA-99).
     firstHalf ? lineUpRow("ABSENT", view.absent.length > 0 ? "row ab" : "row ab empty", view.absent, state, editable, false, editable ? "absent" : null) : null
   );
 }
 
+/** GDA-143: true once either half has kicked off (the game details screen is then "Game details", not "New game"). */
+function gameHasKickedOff(game) {
+  return typeof game.firstHalfStartedAt === "number" || typeof game.secondHalfStartedAt === "number";
+}
+
+/** True while the 1st half is In progress (started, not ended). GDA-142 uses it for goals from the 2nd half plan. */
+function firstHalfRunning(game) {
+  return game.state === FIRST_HALF && typeof game.firstHalfStartedAt === "number" && typeof game.firstHalfEndedAt !== "number";
+}
+
 /**
- * A half that is Not started (GDA-95). 1st Half: the line-up and Start 1st half (today's line-up screen).
- * 2nd Half: once the 1st half has ended, the half-time plan and Start 2nd half; before that, the line-up
- * for looking at, and a greyed-out button saying when it can start.
+ * A half that is Not started (GDA-95, GDA-120). The head bar has the Start chip (1st Half: always; 2nd Half: greyed out until the
+ * 1st half has ended) and a 0:00 clock. 1st Half: the line-up. 2nd Half: the half-time plan, or the line-up for looking at.
  */
 function notStartedHalf(state, actions, half) {
   const game = openGame(state);
   const view = halfLineUpView(game, state.players, half);
-  if (half === 1) {
-    return {
-      fixed: true,
-      noMove: true,
-      nodes: [
-        navBar("1st Half", "Not started", state, actions),
-        planBody(game, view, state, actions, { editable: true, firstHalf: true }),
-        bottomBar(state, actions, lineUpButton(view, state, actions)),
-        gameDetailsSheet(state, game, actions),
-      ],
-    };
-  }
-  const startable = canStartHalf(game, 2);
-  const main = startable
-    ? h("button", { class: "btn pri main", id: "startSecond", onclick: actions.startSecondHalf }, "Start 2nd half")
-    : h("button", { class: "btn main", id: "startSecond", disabled: true }, "Starts when the 1st half ends");
-  // GDA-97: the plan can be edited from before kick-off (frame 4: "Planning" while the 1st half is on) until Start 2nd half.
-    return {
+  const startable = half === 1 ? true : canStartHalf(game, 2);
+  const chip = half === 1
+    ? headChip("startFirst", "Start 1st half", "play", true, actions.startFirstHalf)
+    : headChip("startSecond", "Start 2nd half", "play", true, startable ? actions.startSecondHalf : null);
+  // GDA-97: the 2nd half plan can be edited from before kick-off until Start 2nd half.
+  const editable = half === 1 ? true : canPlan(game);
+  return {
     fixed: true,
     noMove: true,
     nodes: [
-      navBar("2nd Half", startable ? "Not started" : "Planning", state, actions),
-      planBody(game, view, state, actions, { editable: canPlan(game), firstHalf: false }),
-      bottomBar(state, actions, main),
+      // GDA-142: on the 2nd half plan while the 1st half runs, the score card takes goals (they go to the 1st half).
+      ...gameHead(state, actions, { label: half === 1 ? "1st Half" : "2nd Half", clock: "0:00", chip, tapScore: half === 2 && firstHalfRunning(game) }),
+      planBody(game, view, state, actions, { editable, firstHalf: half === 1 }), // Absent / Back in is by drag only (Ben, 2026-11-15)
+      bottomBar(state, actions), // empty unless there is an error message
       gameDetailsSheet(state, game, actions),
-    ].filter(Boolean),
+      half === 2 && firstHalfRunning(game) ? goalDialog(state, game, actions) : null,
+    ],
   };
 }
 
@@ -1067,13 +1099,12 @@ function formationBox({ size, shown, disabled, onValid }) {
   return h("div", { class: "f" }, h("label", { for: "formation" }, "Formation"), input);
 }
 
-/** The settings cog (GDA-64): opens the Game details sheet. Sits at the far edge, away from the game buttons. */
-function cogButton(actions, extra = "", state = null) {
-  // GDA-100: looking at a finished game keeps the cog's place (nothing moves) but it cannot be seen or used.
-  if (state?.viewId) {
-    return h("span", { class: ("cog gone " + extra).trim(), "aria-hidden": "true" });
-  }
-  return h("button", { class: ("cog " + extra).trim(), id: "cog", "aria-label": "Game details", onclick: actions.openRotation }, icon("settings"));
+/**
+ * Settings (GDA-64, GDA-120): a round 56px button that opens the Game details sheet. On a pitch it sits 8px in from the bottom-left
+ * corner, mirroring the swap pill; at Full Time it sits left of "End game and save" (see fullTimeScreen).
+ */
+function settingsButton(actions) {
+  return h("button", { class: "cog corner", id: "cog", "aria-label": "Settings", onclick: actions.openRotation }, icon("settings"));
 }
 
 /**
@@ -1106,7 +1137,7 @@ export function playerPicker({ title, subtitle, players, selected, multi, doneLa
       { class: "ptile" + (multi ? (on ? " here" : " away") : "") + (chosen === player.id ? " here" : ""), "data-here": player.id, "aria-pressed": multi ? String(on) : undefined, "aria-label": multi ? `${player.name}, ${on ? "here" : "absent"}` : player.name, onclick: () => onToggle(player.id) },
       h("span", { class: "pav" }, avatar(player)),
       h("span", { class: "pnm" }, player.name),
-      multi ? h("span", { class: "pchk" }, on ? "\u2713" : "") : null
+      multi || chosen === player.id ? h("span", { class: "pchk" }, on || chosen === player.id ? "\u2713" : "") : null
     );
   };
   return h(
@@ -1219,7 +1250,7 @@ function gameDetailsSheet(state, game, actions) {
     h(
       "div",
       { class: "sheet" },
-      sheetHead("Game details", actions.closeRotation, "rotX"),
+      sheetHead("Game settings", actions.closeRotation, "rotX"),
       setCard(
         h("div", { class: "setrow" }, h("span", {}, "Rotation length"), rotationPicker(clampRotation(game.rotationMinutes ?? 6, halfOf(game)), snappedSeconds(game.rotationExtraSeconds, clampRotation(game.rotationMinutes ?? 6, halfOf(game)), halfOf(game)), halfOf(game), actions.setRotation)),
         formationRow(game, actions),
@@ -1228,8 +1259,9 @@ function gameDetailsSheet(state, game, actions) {
       ),
       // GDA-86, GDA-105: on both half screens (editable until the 2nd half starts, read-only after).
       carryOverSwitches(carryValuesOf(game), !canChangeCarryOver(game), actions),
-      undoRow && !state.undoKickOffAsk ? setCard(undoRow) : undoRow,
-      h("button", { class: "btn pri", id: "rotDone", onclick: actions.closeRotation }, "Done")
+      // GDA-143: Done sits where Undo kick-off used to, Undo kick-off at the bottom.
+      h("button", { class: "btn pri", id: "rotDone", onclick: actions.closeRotation }, "Done"),
+      undoRow && !state.undoKickOffAsk ? setCard(undoRow) : undoRow
     )
   );
 }
@@ -1240,12 +1272,13 @@ function gameDetailsSheet(state, game, actions) {
  * without, it is plain text (before kick-off, nothing to remove).
  */
 let scoreFlashAt = 0;
+const SCORE_FLASH_MS = 1500; // the score card fades from pink to white over this long (keep in step with scoreFade in style.css)
 /** Class (and delay) for a score panel. While the flash runs, a redraw resumes the fade part-way instead of restarting it. */
 function scoreFlashProps(cls) {
   const elapsed = Date.now() - scoreFlashAt;
-  return elapsed >= 0 && elapsed < 1500 ? { class: cls + " flash", style: `animation-delay: -${elapsed}ms` } : { class: cls };
+  return elapsed >= 0 && elapsed < SCORE_FLASH_MS ? { class: cls + " flash", style: `animation-delay: -${elapsed}ms` } : { class: cls };
 }
-/** Starts the pale-yellow flash on the score panel (GDA-90). Screens are redrawn often, so scoreBox keeps it going. */
+/** Starts the violet outline flash (1 second) on the score panel (GDA-90). Screens are redrawn often, so scoreBox keeps it going. */
 export function startScoreFlash() {
   scoreFlashAt = Date.now();
 }
@@ -1268,38 +1301,67 @@ export function setLogos(logos) {
 }
 
 /**
- * The header card at the top of a half that is In progress or Ended (GDA-75, GDA-95): ‹ arrow, half and
- * clock, two team rows (logo, name, score), › arrow, and a thin bar along the bottom edge that fills over
- * the half (drawClock moves it). With `actions` the team rows are one button (tap = Who scored? / Undo
- * last goal); without, plain text.
+ * One round chip on the head bar (GDA-120): Start (triangle), Stop (square) or Resume half (undo arrow). `go` is the solid dark look.
+ * `onClick` null draws it greyed out and inert (aria-disabled). The chip always sits in the same 64px slot.
  */
-function gameHeader(text, label, game, actions, state, arrows) {
-  const score = scoreOf(game);
-  const team = state.teams.find((t) => t.id === (game.teamId ?? state.currentTeamId));
-  const usName = team?.name ?? "Us";
-  const row = (name, logo, n, id) => h("span", { class: "trow" }, teamLogo(name, logo), h("span", { class: "tn" }, name), h("span", { class: "tg", id }, String(n)));
-  const rows = [row(usName, currentLogos[team?.id], score.us, "scoreUs"), row(game.opposition, null, score.them, "scoreThem")];
-  const teams = actions
-    ? h("button", { ...scoreFlashProps("teams"), id: "score", "aria-label": `Score, ${usName} ${score.us}, ${game.opposition} ${score.them}. Tap to add or undo a goal`, onclick: actions.openGoalDialog }, ...rows)
-    : h("div", { ...scoreFlashProps("teams"), id: "score" }, ...rows);
-  return h(
-    "div",
-    { class: "clk" },
-    arrows[0],
-    h("div", { class: "ck" }, h("span", { class: "hf" }, label), h("b", { id: "clock" }, text)),
-    teams,
-    arrows[1],
-    h("div", { class: "hp" }, h("i", { id: "halfBar" }))
-  );
+function headChip(id, label, iconName, go, onClick) {
+  const props = { class: (go ? "chip go" : "chip") + (onClick ? "" : " off"), id, "aria-label": label };
+  if (onClick) {
+    props.onclick = onClick;
+  } else {
+    props.disabled = true; // a real disabled button: it cannot be tapped or focused, and a screen reader says so
+  }
+  const chip = h("button", props, icon(iconName));
+  chip.tapAction = onClick; // GDA-141: the clock beside it does the same thing
+  return chip;
 }
 
 /**
- * A half that is In progress or Ended (GDA-95). In progress: the time is worked out from the saved start
- * time every time it is drawn; End Half is the main button. Ended: the clock is frozen at the saved end
- * time, a note replaces the swap strip, nothing can be moved, and the main button is Resume half (only
- * while the next half has not started). The header, strip, pitch and bottom row are the same size in both
- * states, so nothing jumps. The TIME strip and the black End Half are always drawn but hidden, and
- * drawClock shows them, so nothing is rebuilt as the clock runs.
+ * The clock in the head bar (GDA-141). With a live chip beside it, a tap on the clock does exactly what the chip does (it is the
+ * chip's own handler, so a double tap is guarded the same way). With no chip or a greyed one it is plain text and does nothing.
+ * Its name is the chip's name, so a screen reader hears the same thing. drawClock only changes its text.
+ */
+function clockNode(clock, chip, over = false) {
+  const action = chip && !chip.disabled ? chip.tapAction : null;
+  return action
+    ? h("button", { class: "clockBtn", id: "clock", "aria-label": chip.getAttribute("aria-label"), onclick: action }, clock)
+    : h("b", { id: "clock" }, clock);
+}
+
+/**
+ * The top of every half screen (GDA-120), as two rows. Row 1 is the hero band: back arrow, half label (plain text, a fixed 64px slot),
+ * the clock (dead centre, never tappable), the chip's 64px slot, next arrow. Row 2 is the white 44px score card: our logo and name on the
+ * left, the score in the middle, their name and logo on the right. With `tapScore` (a game that can take goals) the whole card is one
+ * button that opens Who scored?. The same sizes in every stage, so nothing moves between them.
+ * `chip` null leaves the slot empty (Full Time, or nothing to resume).
+ */
+function gameHead(state, actions, { label, clock, over = false, chip = null, nextGo = false, tapScore = true, showScore = true }) {
+  const game = openGame(state);
+  const score = scoreOf(game);
+  const team = state.teams.find((t) => t.id === (game.teamId ?? state.currentTeamId));
+  const usName = team?.name ?? "Us";
+  const [back, next] = navArrows(state, actions, nextGo);
+  const words = label.split(" ");
+  const labelNode = h("h1", { class: "hl" }, words[0], " ", h("br"), words.slice(1).join(" ")); // the screen's heading, in two lines
+  const band = h("div", { class: over ? "clk bar hb over" : "clk bar hb" }, back, labelNode, h("div", { class: "ck" }, clockNode(clock, chip, over)), h("div", { class: "cs" }, chip), next);
+  const parts = [
+    h("span", { class: "side l" }, teamLogo(usName, currentLogos[team?.id]), h("span", { class: "tn" }, usName)),
+    h("span", { class: "mid" }, h("span", { class: "tg", id: "scoreUs" }, String(score.us)), h("span", { class: "dash", "aria-hidden": "true" }, "\u2013"), h("span", { class: "tg", id: "scoreThem" }, String(score.them))),
+    h("span", { class: "side r" }, h("span", { class: "tn" }, game.opposition), teamLogo(game.opposition, null)),
+  ];
+  const card = tapScore && canAddGoal(game)
+    ? h("button", { ...scoreFlashProps("scard"), id: "score", "aria-label": `${usName} ${score.us}, ${game.opposition} ${score.them}. Who scored?`, onclick: actions.openGoalDialog }, ...parts)
+    : h("div", { ...scoreFlashProps("scard"), id: "score" }, ...parts);
+  // GDA-144: Full Time shows the score once (the big one below), so it asks for no score row here.
+  return showScore ? [band, card] : [band];
+}
+
+/**
+ * A half that is In progress or Ended (GDA-95, GDA-120). In progress: the time is worked out from the saved start
+ * time every time it is drawn; the Stop chip (End Half) is on the head bar. Ended: the clock is frozen at the saved end
+ * time, there is no swap pill, nothing can be moved, and the chip is Resume half (only while the next half has not
+ * started). The head bar and pitch are the same size in both states, so nothing jumps. The Stop chip is always
+ * drawn, and drawClock turns it solid dark when time is up and fills in the swap pill, so nothing is rebuilt as the clock runs.
  */
 function runningHalf(state, actions, half) {
   const game = openGame(state);
@@ -1308,26 +1370,23 @@ function runningHalf(state, actions, half) {
   const startedAt = half === 2 ? game.secondHalfStartedAt : game.firstHalfStartedAt;
   const endedAt = half === 2 ? game.secondHalfEndedAt : game.firstHalfEndedAt;
   const clock = clockText(startedAt, live ? Date.now() : endedAt, halfOf(game));
-  const label = half === 2 ? "2ND HALF" : "1ST HALF";
-  const strip = live
-    ? swapStrip(game, state, actions)
-    : h("div", { class: "strip", id: "strip" }, h("div", { class: "sl", id: "endedNote" }, h("b", { class: "a" }, `${half === 2 ? "2nd" : "1st"} half ended`)));
-  let main;
+  const atHalfTime = half === 1 && canResumeHalf(game, 1);
+  const label = atHalfTime ? "Half Time" : half === 2 ? "2nd Half" : "1st Half";
+  let chip = null; // nothing to stop or resume: the slot stays, empty
   if (live) {
-    main = h("button", { class: "btn eh wide", id: "endHalf", onclick: actions.endHalf }, icon("flag"), "End Half");
+    // Stop = End Half (no confirmation; Resume half at Half Time is the way back). drawClock makes it solid dark when time is up.
+    chip = headChip("endHalf", "End half", "stop", isTimeUp(startedAt, Date.now(), halfOf(game)), actions.endHalf);
   } else if (canResumeHalf(game, half)) {
-    main = h("button", { class: "btn eh wide", id: "resumeHalf", onclick: actions.resumeHalf }, "Resume half");
-  } else {
-    main = h("div", { class: "mainGap" }); // Keeps the cog where it is when there is nothing to resume.
+    chip = headChip("resumeHalf", "Resume half", "undo", false, actions.resumeHalf);
   }
   return {
     fixed: true,
     noMove: true,
     nodes: [
-      gameHeader(clock, label, game, canAddGoal(game) ? actions : null, state, navArrows(state, actions)),
-      strip,
-      h("div", { class: "lu" }, ...pitchAndBench(view, state, live, view.bench.length > 6, true)),
-      bottomBar(state, actions, main),
+      ...gameHead(state, actions, { label, clock, over: isTimeUp(startedAt, live ? Date.now() : endedAt, halfOf(game)), chip, nextGo: atHalfTime }),
+      // GDA-125: no strip. The swap pill lives on the pitch and only while the half is running.
+      h("div", { class: "lu" }, ...pitchAndBench(view, state, live, view.bench.length > 6, true, false, live ? swapPill(game, state, actions) : null, actions)),
+      bottomBar(state, actions), // empty unless there is an error message
       gameDetailsSheet(state, game, actions),
       goalDialog(state, game, actions),
       noteSheet(state, game, actions),
@@ -1359,7 +1418,7 @@ function goalDialog(state, game, actions) {
   const ownGoal = h(
     "button",
     { class: "ptile og", id: "ownGoal", onclick: () => actions.chooseScorer(null) },
-    h("span", { class: "pav" }, h("span", { class: "av" }, "OG")),
+    h("span", { class: "pav" }, h("span", { class: "av c3" }, "OG")),
     h("span", { class: "pnm" }, "Own goal")
   );
   return playerPicker({
@@ -1384,38 +1443,76 @@ function goalDialog(state, game, actions) {
 }
 
 /**
- * The one fixed-height strip under the clock (GDA-63). It holds, one at a time, the Swap
- * Time message (drawSwapMessage fills it in), "Swap done / Undo" for about 5 seconds after
- * a Swap, or TIME when the half is over (drawClock shows it). The Swap button sits beside
- * the message or TIME while pairs are planned. The height never changes, so the pitch and
- * bench never move. The rules for Swap, Undo and the message are unchanged.
+ * The swap pill (GDA-125), inside the pitch's bottom-right corner, in the keeper's row. It does every job the old
+ * swap strip did, in 112 x 60 and never changing size: counts down to the swap (the pill fades from white to pink), shows Swap
+ * in the last 30 seconds, SWAP TIME, late, TIME, and Undo for UNDO_MS after a swap. Only drawn while a half runs.
+ * drawSwapPill fills in the words each second. The button on top is there only when a tap does something
+ * (Swap while a pair is planned, Undo after a swap), so with nothing planned a tap does nothing.
  */
-/** One names line of the strip: "Off A, B -> On C, D" (or just "On C" when nobody comes off). Used for the swap message and "Swapped". */
-function namesLine(off, on) {
-  return off === null || off === ""
-    ? h("div", { class: "b" }, h("b", {}, "On"), ` ${on}`)
-    : h("div", { class: "b" }, h("b", {}, "Off"), ` ${off} \u2192 `, h("b", {}, "On"), ` ${on}`);
-}
-
-function swapStrip(game, state, actions) {
+function swapPill(game, state, actions) {
   const planned = pairsOf(game).length > 0;
   const undo = !planned && state.undo && Date.now() < state.undo.until ? state.undo : null;
-  // GDA-99: the same layout in every state. Words on the left, one button on the right (Swap, or Undo for a few seconds after a swap).
   return h(
-    "div",
-    { class: "strip", id: "strip" },
-    h("div", { class: "sl", id: "swapMsg", hidden: true }),
-    h("div", { class: "sl", id: "timeStrip", hidden: true }, h("div", { class: "a" }, "TIME")),
+    "span", // not a div: the pitch's last-of-type rules count its lines (divs) only
+    { class: undo ? "pill undo" : "pill next", id: "swapPill" },
+    undo ? null : pillRing(),
+    undo ? h("div", { class: "ptx" }, h("div", { class: "pu" }, icon("undo"), "Undo")) : h("div", { class: "ptx", id: "pillText" }),
     undo
-      ? h("div", { class: "sl", id: "swappedMsg" }, h("div", { class: "a" }, "Swapped"), undo.names ? namesLine(undo.names.off.join(", "), undo.names.on.join(", ")) : null)
-      : null,
-    undo
-      ? h("button", { class: "btn swp undoBtn", id: "undo", onclick: actions.undo }, "Undo")
-      : planned ? h("button", { class: "btn swp", id: "swap", onclick: actions.swap }, "Swap") : null
+      ? h("button", { class: "pillTap", id: "undo", "aria-label": "Undo the swap", onclick: actions.undo })
+      : planned ? h("button", { class: "pillTap", id: "swap", "aria-label": "Swap", onclick: actions.swap }) : null
   );
 }
 
+/**
+ * The ring round the swap pill (Ben, 2026-11-14): works like the ring round a bench circle. It fills clockwise
+ * from the top as the longest-waiting bench player's time runs towards the rotation length, is full when the swap
+ * is due, and turns red once it is late. It sits just inside the pill's edge, so the pill never changes size.
+ * drawSwapPill sets the fill. The path is measured as 100 long (pathLength), so the fill is a plain percentage.
+ */
+function pillRing() {
+  const w = 3; // stroke width; the path runs down the middle of it
+  const [W, H] = [112, 60]; // the pill's fixed size (--s112 x --s60)
+  const r = H / 2 - w / 2;
+  const [l, t, rt, b] = [w / 2, w / 2, W - w / 2, H - w / 2];
+  const d =
+    `M ${W / 2} ${t} H ${rt - r} A ${r} ${r} 0 0 1 ${rt - r} ${b} H ${l + r} A ${r} ${r} 0 0 1 ${l + r} ${t} Z`;
+  const holder = document.createElement("div");
+  holder.innerHTML =
+    `<svg class="pr" viewBox="0 0 ${W} ${H}" aria-hidden="true">` +
+    `<path class="r0" d="${d}" stroke-width="${w}" pathLength="100"></path>` +
+    `<path class="r1" d="${d}" stroke-width="${w}" pathLength="100" stroke-dasharray="0 100"></path></svg>`;
+  return holder.firstChild;
+}
+
 let lastActions = null;
+
+/** How far a planned-pair line or cross keeps from the swap pill (GDA-125). */
+const PILL_CLEAR = 4;
+
+/**
+ * The parts of the line `cut` that lie outside `box` (grown by `margin`): none, one or two pieces. Lets a planned-pair
+ * line run "behind" the swap pill without ever touching it. Plain rectangle clipping along the line.
+ */
+function outsideBox(cut, box, margin) {
+  const left = box.left - margin, right = box.right + margin, top = box.top - margin, bottom = box.bottom + margin;
+  const dx = cut.x2 - cut.x1, dy = cut.y2 - cut.y1;
+  let t0 = 0, t1 = 1;
+  for (const [p, q] of [[-dx, cut.x1 - left], [dx, right - cut.x1], [-dy, cut.y1 - top], [dy, bottom - cut.y1]]) {
+    if (p === 0) {
+      if (q < 0) return [cut]; // parallel to this side and outside it: never inside
+    } else if (p < 0) {
+      t0 = Math.max(t0, q / p);
+    } else {
+      t1 = Math.min(t1, q / p);
+    }
+  }
+  if (t0 >= t1) return [cut]; // misses the box
+  const piece = (from, to) => ({ x1: cut.x1 + dx * from, y1: cut.y1 + dy * from, x2: cut.x1 + dx * to, y2: cut.y1 + dy * to });
+  const parts = [];
+  if (t0 > 0) parts.push(piece(0, t0));
+  if (t1 < 1) parts.push(piece(t1, 1));
+  return parts;
+}
 
 /**
  * Draws a dotted line for each planned pair, from the bench circle to the field player
@@ -1437,6 +1534,16 @@ export function drawPairLines(state, actions = lastActions) {
     return { x: c.left + c.width / 2 - box.left, y: c.top + c.height / 2 - box.top };
   };
   const edge = (area.querySelector(".row.live")?.getBoundingClientRect().top ?? box.bottom) - box.top;
+  // GDA-125: the swap pill's box (with a small margin), so a line never runs over it and a cross never sits on it.
+  const pillRaw = area.querySelector("#swapPill")?.getBoundingClientRect();
+  const pill = pillRaw
+    ? { left: pillRaw.left - box.left, right: pillRaw.right - box.left, top: pillRaw.top - box.top, bottom: pillRaw.bottom - box.top }
+    : null;
+  // GDA-120: the same keep-clear for the Settings button in the bottom-left corner.
+  const cogRaw = area.querySelector("#cog")?.getBoundingClientRect();
+  const cog = cogRaw
+    ? { left: cogRaw.left - box.left, right: cogRaw.right - box.left, top: cogRaw.top - box.top, bottom: cogRaw.bottom - box.top }
+    : null;
   let lines = "";
   const crosses = h("div", { class: "px" });
   for (const pair of pairsOf(game)) {
@@ -1452,13 +1559,24 @@ export function drawPairLines(state, actions = lastActions) {
       const radius = (slot) => slot.querySelector(".av").getBoundingClientRect().width / 2 + 2;
       const cut = trimmedLine(a, b, radius(from), radius(to));
       if (cut) {
-        lines += `<line class="dl plan" x1="${cut.x1}" y1="${cut.y1}" x2="${cut.x2}" y2="${cut.y2}" stroke-dasharray="2 6"></line>`;
+        const clearOfPill = pill ? outsideBox(cut, pill, PILL_CLEAR) : [cut];
+        for (const part of cog ? clearOfPill.flatMap((piece) => outsideBox(piece, cog, PILL_CLEAR)) : clearOfPill) {
+          lines += `<line class="dl plan" x1="${part.x1}" y1="${part.y1}" x2="${part.x2}" y2="${part.y2}" stroke-dasharray="2 6"></line>`;
+        }
       }
     }
     const along = !b || b.y === a.y ? 0.5 : (edge - a.y) / (b.y - a.y);
-    const x = Math.max(22, Math.min(box.width - 22, b ? a.x + (b.x - a.x) * along : a.x));
+    let x = Math.max(22, Math.min(box.width - 22, b ? a.x + (b.x - a.x) * along : a.x));
+    // The cross is 44px wide to tap; if that would touch the pill it moves to just left of it.
+    if (pill && edge - 14 + 22 > pill.top - PILL_CLEAR && x + 22 > pill.left - PILL_CLEAR && x - 22 < pill.right + PILL_CLEAR) {
+      x = pill.left - PILL_CLEAR - 22;
+    }
+    // The same for the Settings button: the cross moves to just right of it.
+    if (cog && edge - 14 + 22 > cog.top - PILL_CLEAR && x + 22 > cog.left - PILL_CLEAR && x - 22 < cog.right + PILL_CLEAR) {
+      x = cog.right + PILL_CLEAR + 22;
+    }
     crosses.append(
-      h("button", { class: "xx", "aria-label": "Remove pair", style: `left:${x}px;top:${edge}px`, onclick: () => actions.unpair(pair.benchId) }, h("span", {}, "\u00d7"))
+      h("button", { class: "xx", "aria-label": "Remove pair", style: `left:${x}px;top:${edge - 14}px`, onclick: () => actions.unpair(pair.benchId) }, h("span", {}, "\u00d7"))
     );
   }
   // Parsed as HTML so the browser puts the SVG parts in the right namespace.
@@ -1467,7 +1585,7 @@ export function drawPairLines(state, actions = lastActions) {
   area.append(holder.firstChild, crosses);
 }
 
-/** Moves the clock, the TIME strip and the End Half colour on, without redrawing the screen. Safe at any moment. */
+/** Moves the clock, the swap pill and the End Half colour on, without redrawing the screen. Safe at any moment. */
 export function drawClock(state) {
   if (state.screen === "interchange") {
     drawTally(state);
@@ -1479,47 +1597,67 @@ export function drawClock(state) {
     const now = Date.now();
     clock.textContent = clockText(startedAtOf(game), now, halfOf(game));
     const timeUp = isTimeUp(startedAtOf(game), now, halfOf(game));
-    // TIME takes the message's place in the same strip (but not while "Swapped / Undo" is showing).
-    document.getElementById("timeStrip").hidden = !timeUp || !!document.getElementById("swappedMsg");
-    document.getElementById("endHalf").classList.toggle("pri", timeUp);
-    // The half progress bar along the bottom of the header card.
-    const seconds = Math.max(0, (now - startedAtOf(game)) / 1000);
-    document.getElementById("halfBar").style.width = Math.min(100, (seconds / (halfOf(game) * 60)) * 100).toFixed(1) + "%";
-    drawBenchTimers(game, now);
-    drawSwapMessage(game, state.players, now, timeUp);
-    // The strip never changes height, so the pair lines never need redrawing here.
-  } else if (clock === null && screenHalf(state.screen) === 2 && game && game.state === FIRST_HALF && typeof game.firstHalfStartedAt === "number" && typeof game.firstHalfEndedAt !== "number") {
-    // GDA-107: the 2nd Half plan while the 1st half runs: only the bench rings and tags move (text and ring length, no redraw).
+    clock.closest(".clk")?.classList.toggle("over", timeUp); // GDA-147: over the half length, the whole head bar turns pink (the clock box has no pink of its own)
+    document.getElementById("endHalf")?.classList.toggle("go", timeUp); // time up: the Stop chip goes solid dark
+    // GDA-150: the pill is drawn first and each part on its own, so a problem in one can never leave the pill without its time.
+    try { drawSwapPill(game, state.players, now, timeUp); } catch (error) { console.error("swap pill", error); }
+    try { drawBenchTimers(game, now); } catch (error) { console.error("bench timers", error); }
+    // The pill never changes size, so the pair lines never need redrawing here.
+  } else if (screenHalf(state.screen) === 2 && game && game.state === FIRST_HALF && typeof game.firstHalfStartedAt === "number" && typeof game.firstHalfEndedAt !== "number") {
+    // GDA-107: the 2nd Half plan while the 1st half runs: only the bench rings and tags move (text and ring length, no redraw). (GDA-120: this screen now shows a 0:00 clock on the band, so this no longer depends on there being no clock.)
     drawBenchTimers(game, Date.now());
   }
 }
 
 /**
- * Fills the swap time into the strip (GDA-104): "SWAP IN 3:20" counting down, yellow for the last
- * 30 seconds, then "SWAP TIME" when due, red with "+1:10" once it is late (30 seconds or more; before
- * that the plus shows but the colour stays black). Time only, no names. The words carry the message,
- * not colour alone. The strip has a fixed height, so the pitch never moves.
+ * Fills the swap pill (GDA-104, GDA-125): "SWAP IN / 3:20" counting down with the lilac fill draining and the ring
+ * filling, "SWAP NOW / 0:00" when due, "SWAP LATE / +1:10" once late (red ring at once, light pink after 30 seconds),
+ * and "TIME" when the half length is reached. While "Undo" is showing the pill is left alone. Time only, no
+ * names. The words carry the message, not colour alone. The pill never changes size, so the pitch never moves.
  */
-function drawSwapMessage(game, squad, now, timeUp) {
-  const strip = document.getElementById("strip");
-  const box = document.getElementById("swapMsg");
-  const swapped = !!document.getElementById("swappedMsg"); // "Swapped / Undo" has the strip for a few seconds.
-  const message = timeUp || swapped ? null : swapMessage(game, squad, now);
-  if (!message) {
-    box.hidden = true;
-    box.textContent = "";
-    box.dataset.key = "";
-    strip.className = timeUp && !swapped ? "strip timeup" : "strip";
+const PILL_WHITE_FROM = 0.85; // how far the white-to-pink fade must have gone (0 to 1) before the pill text turns white
+function drawSwapPill(game, squad, now, timeUp) {
+  const pill = document.getElementById("swapPill");
+  if (!pill || pill.classList.contains("undo")) {
     return;
   }
   const mmss = (total) => `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
-  const title = message.phase === "due" ? (message.late > 0 ? `SWAP TIME +${mmss(message.late)}` : "SWAP TIME") : `SWAP IN ${mmss(message.countdown)}`;
-  if (box.dataset.key !== title) {
-    box.dataset.key = title;
-    box.replaceChildren(h("div", { class: "a" }, title));
+  const message = swapMessage(game, squad, now); // GDA-150: still counts when the half is over time (the pink head bar says time is up)
+  // [text, size] pairs: sm = 12px words on top, lg = 20px time below. Always that way round, so the time is
+  // always the biggest thing and never swaps places (Ben, 2026-11-14).
+  let lines;
+  let look;
+  let fade = 1; // GDA-140: 0 = white (rotation just started) to 1 = pink (Swap Time and later)
+  let ring = 0; // how full the ring is, 0 to 1
+  let over = false; // red ring: the swap is late
+  if (!message) {
+    lines = [["TIME", "lg"]];
+    look = "timeup";
+  } else if (message.phase === "next" || message.phase === "warn") {
+    lines = [["SWAP IN", "sm"], [mmss(message.countdown), "lg"]];
+    look = message.phase;
+    ring = 1 - message.countdown / rotationSecondsOf(game);
+    fade = ring;
+  } else {
+    over = message.late > 0;
+    lines = over ? [["SWAP LATE", "sm"], [`+${mmss(message.late)}`, "lg"]] : [["SWAP NOW", "sm"], ["0:00", "lg"]];
+    look = over ? "late" : "swap";
+    ring = 1;
   }
-  box.hidden = false;
-  strip.className = "strip " + (message.phase === "next" ? "" : message.phase === "warn" ? "warn" : message.late >= 30 ? "late" : "swap");
+  const key = lines.map((line) => line.join(":")).join("|");
+  const text = document.getElementById("pillText");
+  if (text.dataset.key !== key) {
+    text.dataset.key = key;
+    text.replaceChildren(...lines.map(([words, size]) => h("div", { class: size }, words)));
+    const tap = pill.querySelector(".pillTap");
+    if (tap && tap.id === "swap") {
+      tap.setAttribute("aria-label", "Swap, " + lines.map((line) => line[0]).join(" "));
+    }
+  }
+  // GDA-140: the words and time go white from the point where the pink is dark enough for white to read (3:1 or better); dark before, so never white on white.
+  pill.className = "pill " + look + (over ? " over" : "") + (look !== "timeup" && fade >= PILL_WHITE_FROM ? " white" : "");
+  pill.querySelector(".pr .r1")?.setAttribute("stroke-dasharray", `${(Math.max(0, Math.min(1, ring)) * 100).toFixed(1)} 100`);
+  pill.style.setProperty("--pill-fade", Math.max(0, Math.min(1, fade)).toFixed(3)); // the CSS mixes white to pink by this much
 }
 
 /** Sets each bench circle's time and ring from the saved times. Same path as the clock, so a lock or reload cannot skew it. */
@@ -1601,14 +1739,16 @@ function fullTimeScreen(state, actions) {
   const open = !state.viewId;
   return {
     nodes: [
-      navBar("Full Time", null, state, actions),
+      ...gameHead(state, actions, { label: "Full Time", clock: "FT", tapScore: false, showScore: false }),
       h(
         "div",
         { class: "body" },
         ...summaryBody(state, game, actions, { canChoose: open && canEditNotes(game), soFar: false }),
         problemLine(state.problem),
-        open ? h("button", { class: "btn pri big", id: "fullTime", onclick: actions.askFullTime }, "End game and save") : null
+        // GDA-120: Settings sits bottom-left, End game and save takes the rest of the row.
+        h("div", { class: "endrow" }, settingsButton(actions), open ? h("button", { class: "btn pri big", id: "fullTime", onclick: actions.askFullTime }, "End game and save") : h("button", { class: "btn big", id: "closeGameBottom", onclick: actions.closeGame }, "Close game"))
       ),
+      gameDetailsSheet(state, game, actions),
       state.fullTimeAsk ? fullTimeSheet(actions) : null,
       open ? potdPicker(state, game, actions) : null,
     ],
@@ -1618,6 +1758,11 @@ function fullTimeScreen(state, actions) {
 /** One player name with its arrow, for an Interchange history row. */
 function moveBit(kind, name) {
   return h("span", { class: "mv" }, h("span", { class: "ar " + (kind === "off" ? "off" : "on"), role: "img", "aria-label": kind }, icon(kind === "off" ? "arrowDown" : "arrowUp")), name);
+}
+
+/** A bench time in its pill: lilac once above 0:00, plain muted at 0:00 (GDA-135). The text is the same either way. */
+function benchPill(seconds) {
+  return h("span", { class: "bt" + (seconds > 0 ? " on" : "") }, benchTimerText(seconds));
 }
 
 const TALLY_HEADINGS = { name: "Name", rotations: "Rotations", seconds: "Bench time" };
@@ -1644,7 +1789,7 @@ function interchangeScreen(state, actions) {
     "table",
     { class: "tally", id: "tally" },
     h("thead", {}, h("tr", {}, ...TALLY_COLUMNS.map(heading))),
-    h("tbody", {}, ...rows.map((r) => h("tr", { "data-id": String(r.id) }, h("td", {}, r.name), h("td", { class: "n" }, String(r.rotations)), h("td", { class: "n", "data-sec": "1" }, benchTimerText(r.seconds)))))
+    h("tbody", {}, ...rows.map((r) => h("tr", { "data-id": String(r.id) }, h("td", {}, r.name), h("td", { class: "n" }, String(r.rotations)), h("td", { class: "n", "data-sec": "1" }, benchPill(r.seconds)))))
   );
   const swaps = interchangeRows(game, events);
   const list = swaps.length === 0
@@ -1659,7 +1804,7 @@ function interchangeScreen(state, actions) {
       );
   return {
     nodes: [
-      header("Interchange history", actions.closeInterchange),
+      centredHeader(header("Interchange history", actions.closeInterchange)),
       h("div", { class: "body" }, h("div", { class: "card" }, h("div", { class: "hd" }, "Bench time"), table), h("div", { class: "card" }, h("div", { class: "hd" }, "Swaps"), list)),
     ],
   };
@@ -1675,7 +1820,7 @@ function drawTally(state) {
   for (const row of tallyRows(game, state.interchange?.events ?? [], state.players, now)) {
     const cell = document.querySelector(`#tally tr[data-id="${row.id}"] td[data-sec]`);
     if (cell && cell.textContent !== benchTimerText(row.seconds)) {
-      cell.textContent = benchTimerText(row.seconds);
+      cell.replaceChildren(benchPill(row.seconds));
     }
   }
 }
@@ -1783,10 +1928,6 @@ const SCREENS = {
 export function drawScreen(state, actions) {
   lastActions = actions;
   const view = SCREENS[state.screen](state, actions);
-  // GDA-33: "Welcome back" after a restart, over whichever game screen opened.
-  if (state.welcome) {
-    view.nodes.unshift(h("div", { class: "welcome", id: "welcome" }, "Welcome back"));
-  }
   document.getElementById("screen").replaceChildren(...view.nodes.filter((n) => n != null)); // GDA-79: a closed sheet is null; never print it as text
   document.getElementById("frame").className = view.fixed ? "fix" : "flow";
   document.body.classList.toggle("lock", Boolean(view.fixed));
@@ -1798,7 +1939,6 @@ export function drawScreen(state, actions) {
  * Redraws only the bottom of the line-up. A drag starting needs this: redrawing the
  * whole screen would remove the circle under the finger and end the drag.
  */
-export function drawLineUpActions(state, actions) {
-  const view = lineUpView(openGame(state), state.players);
-  document.querySelector(".acts").replaceChildren(...bottomRow(state, actions, lineUpButton(view, state, actions)));
+export function drawLineUpActions() {
+  document.querySelector(".acts")?.replaceChildren();
 }

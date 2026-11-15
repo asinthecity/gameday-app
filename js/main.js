@@ -25,8 +25,6 @@ import {
   US,
   clampRotation,
   liveAction,
-  markedAbsent,
-  markedBackIn,
   movedOnto,
   lineUpMoved,
   planMoved,
@@ -50,7 +48,6 @@ import {
   carriesBenchTime,
   withVenue,
   hereDifferences,
-  pairsOf,
 } from "./game-rules.js";
 import { loadGameEvents, archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlan, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, reorderPlanBench, startFirstHalf, startSecondHalf, undoKickOff, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
 import { canSend, checkMessage, parseSetupCode, SETTINGS_KEY, sheetTabOf } from "./sheet-rules.js";
@@ -76,11 +73,8 @@ const FULL_TIME_PROBLEM = "Not saved. The game is still open. Tap End game and s
 // double tap cannot land on whatever is now under the finger.
 const TAP_PAUSE_MS = 300;
 
-const WELCOME_MS = 5000;
-
 let db = null;
 let ignoreTapsUntil = 0;
-let ignoreReadyUntil = 0;
 let saving = false;
 let listScroll = 0; // Where the Squad list was, for coming back to it.
 
@@ -100,7 +94,6 @@ const state = {
   hereDraft: null, // GDA-43: the Who is here picker's unsaved draft (a Set of player ids), or null when closed.
   undoKickOffAsk: false, // Undo kick-off confirm showing in the Game details sheet.
   rotationOpen: false, // The rotation stepper sheet on the ready and game screens.
-  welcome: false, // The "Welcome back" banner after a restart. Never saved.
   goalOpen: false, // The "Who scored?" dialog (GDA-90).
   interchange: null, // GDA-121: { events } read when Interchange history opens. Never saved.
   interchangeBack: null, // The screen Interchange history returns to. Never saved.
@@ -432,17 +425,6 @@ async function saveThenShowLineUp(saveChange) {
   }
 }
 
-/**
- * Absent and Back in: a rule from game-rules.js applied to the selected player.
- * The bottom button becomes Ready for kick-off under the finger, so that one button
- * pauses briefly: a fast double tap must not go on to tap it too. The circles do
- * not pause, because the next step in a late change is tapping a bench player.
- */
-async function saveSelectedPlayer(rule) {
-  await saveThenShowLineUp(() => changeGame(db, state.gameId, (game) => rule(game, state.selectedId)));
-  ignoreReadyUntil = Date.now() + TAP_PAUSE_MS;
-}
-
 function saveMove(playerId, spot) {
   return saveThenShowLineUp(() => movePlayer(db, state.gameId, playerId, spot, Date.now()));
 }
@@ -471,14 +453,10 @@ function saveLive(playerId, spot) {
 const UNDO_MS = 5000;
 async function saveSwap() {
   saving = true;
-  // Who swapped, for the strip's "Swapped" line (GDA-99). Worked out first: the planned pairs are cleared by the swap.
-  const planned = pairsOf(openGame());
-  const nameOf = (id) => state.players.find((player) => player.id === id)?.name ?? "";
-  const names = { off: planned.filter((pair) => pair.fieldId !== null).map((pair) => nameOf(pair.fieldId)), on: planned.map((pair) => nameOf(pair.benchId)) };
   try {
     const done = await swapPlayers(db, state.gameId, Date.now());
     state.games = await gamesNow();
-    state.undo = { before: done.before, eventId: done.eventId, names, until: Date.now() + UNDO_MS };
+    state.undo = { before: done.before, eventId: done.eventId, until: Date.now() + UNDO_MS };
   } catch (error) {
     console.warn("Swap did not save", error);
     saving = false;
@@ -668,8 +646,6 @@ const actions = {
     }
   }),
   openLineUp: tap((gameId) => openLineUp(gameId)),
-  markAbsent: tap(() => saveSelectedPlayer(markedAbsent)),
-  markBackIn: tap(() => saveSelectedPlayer(markedBackIn)),
   // The ‹ and › arrows (GDA-95). They only change which screen is shown: nothing is saved, and the
   // clock, swap alert and bench timers (all worked out from saved times) carry on underneath.
   // GDA-100: open a finished game for looking. It starts on 1st Half; ‹ there goes back to Home. Nothing is written.
@@ -680,6 +656,12 @@ const actions = {
     }
     state.viewId = gameId;
     goTo("half1");
+  }),
+  // GDA-149: leave a finished game being looked at, straight to Home. goTo("home") clears viewId; nothing is saved.
+  closeGame: tap(() => {
+    if (state.viewId) {
+      goTo("home");
+    }
   }),
   goBack: tap(() => {
     const to = state.viewId && state.screen === "half1" ? "home" : backScreen(state.screen);
@@ -825,10 +807,7 @@ const actions = {
     draw();
   }),
   startFirstHalf: tap(() => {
-    // The button under a selected player is Absent / Back in, which pauses briefly after it changes (see saveSelectedPlayer).
-    if (Date.now() >= ignoreReadyUntil) {
-      startGame();
-    }
+    startGame();
   }),
   swap: tap(() => saveSwap()),
   // GDA-90: the score header opens "Who scored?" while a half runs and at Half Time.
@@ -1152,6 +1131,7 @@ const presses = watchLineUpPresses({
     state.noteFor = spot.playerId;
     state.noteDraft = null;
     state.problem = "";
+    ignoreTapsUntil = Date.now() + TAP_PAUSE_MS; // GDA-120: lifting the finger must not hit Done, which can now sit under a low bench circle
     draw();
   },
   canPress: () => circleMode() !== null && readyForTaps(),
@@ -1312,15 +1292,6 @@ function resumeGameIfAny() {
   }
   state.gameId = resume.game.id;
   state.screen = resume.screen;
-  state.welcome = true; // On every game screen a restart can open (GDA-33, GDA-95).
-  // "Welcome back" goes after 5 seconds or at the first tap.
-  setTimeout(hideWelcome, WELCOME_MS);
-  document.addEventListener("pointerdown", hideWelcome, { once: true, capture: true });
-}
-
-function hideWelcome() {
-  state.welcome = false;
-  document.getElementById("welcome")?.remove();
 }
 
 async function start() {
