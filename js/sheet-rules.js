@@ -7,6 +7,10 @@
 
 export const SETTINGS_KEY = "sheetSettings";
 
+// The template spreadsheet's Make-a-copy link (GDA-170). One place, shared by the test and real
+// copies. The Delivery Lead swaps in the real ID. Not in config.js (the real copy keeps its own).
+export const TEMPLATE_COPY_URL = "https://docs.google.com/spreadsheets/d/1UqUggF022Y6U-c3zUHpjN6NxGMP2aFEmRFSfylw_rvY/copy";
+
 /** True if both the web address and the secret have been entered. */
 export function settingsComplete(settings) {
   return Boolean(settings && settings.url && settings.secret);
@@ -68,14 +72,41 @@ export function sheetTabOf(config) {
   return config && config.sheetTab === "Season" ? "Season" : "Test";
 }
 
+/** Google Sheets does not allow these characters in a tab name. */
+const FORBIDDEN_TAB_CHARACTERS = /[\[\]*?:/\\]/g;
+const MAX_TAB_LENGTH = 100;
+
+/**
+ * The tab one team's games go to (GDA-163). Game copy: the team's name. Test copy: "Test – <name>".
+ * Each forbidden character becomes "-", spaces at both ends go, an empty name becomes "Team",
+ * and the whole tab name (prefix included) is cut to 100. The script applies the same rule again.
+ */
+export function sheetTabName(teamName, config) {
+  const name = String(teamName ?? "").replace(FORBIDDEN_TAB_CHARACTERS, "-").trim() || "Team";
+  const prefix = sheetTabOf(config) === "Test" ? "Test \u2013 " : "";
+  return (prefix + name).slice(0, MAX_TAB_LENGTH).trim();
+}
+
+/**
+ * The one app-wide Sheet setting (GDA-163). The old shared setting wins if there is one, else the
+ * first team in the list that has its own. Gives null if none. Only the move on first open uses this.
+ */
+export function firstSheetSetup(sharedSetting, teams) {
+  if (settingsComplete(sharedSetting)) {
+    return sharedSetting;
+  }
+  return teams.map((team) => team.sheet).find((setting) => settingsComplete(setting)) ?? null;
+}
+
 /** The text posted to the script. One game, all its rows, in one go. */
 export function sheetBody(settings, game, tab) {
   return JSON.stringify({ secret: settings.secret, tab, action: "add", gameId: game.id, headings: SHEET_HEADINGS, rows: sheetRows(game.record, game.id) });
 }
 
 /** The connection check: same address and secret, writes no row. */
-export function checkBody(settings, tab) {
-  return JSON.stringify({ secret: settings.secret, tab, action: "check" });
+export function checkBody(settings) {
+  // No tab: a check needs none, and the script makes none for it (GDA-163).
+  return JSON.stringify({ secret: settings.secret, action: "check" });
 }
 
 /**
@@ -99,7 +130,7 @@ export function readCheckReply(status, json, online) {
 /** The one message shown after Save. */
 export function checkMessage(kind, tab) {
   switch (kind) {
-    case "connected": return `Connected. Games go to the ${tab} tab.`;
+    case "connected": return `Connected. Games go to a tab named after the team, for example ${tab}.`;
     case "secret": return "The setup code is out of date. Copy it again from the Sheet's Game Day menu.";
     case "offline": return "No signal. Saved; it will be checked when you send.";
     case "tooOld": return "The script in the Sheet is out of date. Paste the new Code.gs.";
@@ -174,4 +205,14 @@ export function archiveWarning(game) {
     return "noStatus";
   }
   return game.sentToSheet ? null : "notInSheet";
+}
+
+/** "Connected" (GDA-170): both address and secret saved. Anything less counts as no Sheet. Only then does the app mention the Sheet on Home, Archive or Delete team. */
+export function sheetConnected(settings) {
+  return settingsComplete(settings);
+}
+
+/** The Archive warning for this game, or null. With no Sheet connected there is nothing to warn about. */
+export function archiveWarningFor(game, settings) {
+  return sheetConnected(settings) ? archiveWarning(game) : null;
 }
