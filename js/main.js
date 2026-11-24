@@ -101,7 +101,7 @@ const state = {
   interchangeBack: null, // The screen Interchange history returns to. Never saved.
   tallySort: { column: "name", descending: false }, // The bench time table's sort. Not remembered.
   listView: false, // GDA-48: the line-up / game shows the List instead of the Pitch. Never saved; every screen opens on the Pitch.
-  seasonMode: "halves", // GDA-176: the season List shows halves or minutes; always opens on halves
+  seasonMode: "halves", // GDA-176/109: halves or minutes, one choice shared by the season List and the player profile; remembered on the phone (meta "seasonMode"), halves the first time
   seasonEvents: {}, // GDA-176: saved events by game, read when the List opens (for minutes)
   seasonSort: { column: "name", descending: false }, // GDA-48: the season List's sort. Not remembered.
   summaryBack: null, // The game screen the mid-game Summary returns to (GDA-108). Never saved.
@@ -132,6 +132,7 @@ const state = {
 };
 
 // The current team's squad and games (never another team's).
+const SEASON_MODE_KEY = "seasonMode"; // GDA-109: where the shared Halves / Minutes choice is kept
 const squadNow = () => loadSquad(db, state.currentTeamId, state.firstTeamId);
 const gamesNow = () => loadGames(db, state.currentTeamId, state.firstTeamId);
 
@@ -154,6 +155,7 @@ async function loadEverything() {
   setLogos(state.logos);
   state.games = await gamesNow();
   state.sheetSettings = await loadSheetSetting(teams);
+  state.seasonMode = (await getMeta(db, SEASON_MODE_KEY)) === "minutes" ? "minutes" : "halves"; // GDA-109
 }
 
 /**
@@ -927,7 +929,6 @@ const actions = {
         state.tallySort = { column: "name", descending: false };
       } else {
         state.seasonSort = { column: "name", descending: false };
-        state.seasonMode = "halves"; // GDA-176: the List always opens on Halves
         state.seasonEvents = await loadSeasonEvents(db); // the minutes are worked out from these
       }
       state.listView = true;
@@ -939,6 +940,7 @@ const actions = {
   }),
   setSeasonMode: (mode) => {
     state.seasonMode = mode === "minutes" ? "minutes" : "halves";
+    setMeta(db, SEASON_MODE_KEY, state.seasonMode).catch((error) => console.warn("Could not remember Halves / Minutes", error)); // a failed save only means it forgets next time
     draw();
   },
   sortSeason: tap((column) => {
@@ -962,6 +964,7 @@ const actions = {
     state.noteFor = null;
     state.noteDraft = null;
     state.problem = "";
+    ignoreTapsUntil = Date.now() + TAP_PAUSE_MS; // A double tap on the background or X must not land on what is underneath.
     draw();
   }),
   // GDA-110: the switch in the hold sheet and the tiles in the picker. Each change is saved at once.
@@ -1286,8 +1289,18 @@ function saveEditBench(playerId, targetId) {
 const presses = watchLineUpPresses({
   // GDA-81: press and hold on a circle (any game screen, from kick-off until End game and save; not a viewed game).
   holdMs: HOLD_MS,
-  canHold: () => readyForTaps() && screenHalf(state.screen) !== 0 && !state.viewId && state.noteFor === null && canEditNotes(openGame()),
-  held(spot) {
+  // GDA-109: the profile opens from the line-up before kick-off too (not for an Absent circle), and in a running game; never on a saved game.
+  canHold: (spot) => {
+    const game = openGame();
+    return readyForTaps() && screenHalf(state.screen) !== 0 && !state.viewId && state.noteFor === null && Boolean(game) && (canEditNotes(game) || (game.state === NOT_STARTED && !game.absent.includes(spot.playerId)));
+  },
+  async held(spot) {
+    try {
+      state.seasonEvents = await loadSeasonEvents(db); // the minutes are worked out from these
+    } catch (error) {
+      console.warn("Could not read the season's events", error);
+      state.seasonEvents = {}; // halves still show; minutes show dashes
+    }
     state.selectedId = null;
     state.noteFor = spot.playerId;
     state.noteDraft = null;
@@ -1548,6 +1561,32 @@ document.addEventListener("touchend", (event) => {
     screen.classList.remove("slideFromRight", "slideFromLeft");
     void screen.offsetWidth;
     screen.classList.add(way === "next" ? "slideFromRight" : "slideFromLeft");
+  }
+}, { passive: true });
+
+// GDA-109: a clear swipe down closes the player profile (saving the note like Done). It must start on the header, or on the
+// content when that is scrolled to the top (so it never fights scrolling), and not in the note box.
+let profileSwipe = null;
+document.addEventListener("touchstart", (event) => {
+  const sheet = event.target.closest?.(".sheet.profile");
+  const body = event.target.closest?.(".psb");
+  profileSwipe = sheet && event.touches.length === 1 && !event.target.closest("textarea, select, input, button") && (!body || body.scrollTop === 0) ? { x: event.touches[0].clientX, y: event.touches[0].clientY } : null;
+}, { passive: true });
+document.addEventListener("touchmove", (event) => {
+  if (event.touches.length > 1) {
+    profileSwipe = null;
+  }
+}, { passive: true });
+document.addEventListener("touchend", (event) => {
+  const from = profileSwipe;
+  profileSwipe = null;
+  if (!from || state.noteFor === null) {
+    return;
+  }
+  const dy = event.changedTouches[0].clientY - from.y;
+  const dx = event.changedTouches[0].clientX - from.x;
+  if (dy >= 80 && dy > 2 * Math.abs(dx)) {
+    actions.closeNote();
   }
 }, { passive: true });
 
