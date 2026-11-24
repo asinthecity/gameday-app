@@ -180,3 +180,19 @@ export function seasonTotals({ games, players, eventsByGame }) {
   }
   return { gamesCounted, gamesWithMinutes, players: result };
 }
+
+/**
+ * GDA-174: the rows of the Player of the Day list. One row per player who is here (absent players are left out), each with the
+ * season count of saved games where they were picked (never today: only saved games are counted). Fewest awards first,
+ * the same count in name order A to Z. `totals` is seasonTotals(); a player it does not know counts 0.
+ * @returns {{ player: object, count: number }[]}
+ */
+export function potdListRows(players, totals, absentIds = [], sort = { column: "count", descending: false }) {
+  // Sort by "name" (A to Z) or "count" (fewest first); a second tap on the same heading flips it. Ties are always A to Z.
+  const byName = (a, b) => a.player.name.localeCompare(b.player.name);
+  const flip = sort.descending ? -1 : 1;
+  return players
+    .filter((p) => !absentIds.includes(p.id))
+    .map((player) => ({ player, count: totals.players.get(player.id)?.potdCount ?? 0 }))
+    .sort((a, b) => (sort.column === "name" ? flip * byName(a, b) : flip * (a.count - b.count) || byName(a, b)));
+}
