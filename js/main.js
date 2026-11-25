@@ -12,6 +12,8 @@ import {
   canReorderBench,
   canAddGoal,
   canEditNotes,
+  canCorrect,
+  canCorrectFinished,
   noteOf,
   potdOf,
   withNote,
@@ -42,6 +44,9 @@ import {
   withRotation,
   withCarryOver,
   carriesRotationOrder,
+  showsSeasonChart,
+  showsRotationCounts,
+  withDisplayChoice,
   carriesBenchTime,
   withVenue,
   hereDifferences,
@@ -49,7 +54,7 @@ import {
 import { loadSeasonEvents, loadGameEvents, archiveGame, deleteGame, markSentToSheet, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlan, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, reorderPlanBench, startFirstHalf, startSecondHalf, undoKickOff, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
 import { canSend, checkMessage, firstSheetSetup, parseSetupCode, SETTINGS_KEY, sheetTabName, TEMPLATE_COPY_URL } from "./sheet-rules.js";
 import { checkSheetConnection, sendGameToSheet } from "./sheet-send.js";
-import { shareCsv, shareFile } from "./share-file.js";
+import { shareFile } from "./share-file.js";
 import { backupFileName, BACKUP_FAILED, makeBackup, parseBackup, RESTORE_BUSY, RESTORE_FAILED } from "./backup-rules.js";
 import { askToKeepDataOnce } from "./persistence.js";
 import { drawClock, drawLineUpActions, drawPairLines, drawScreen, screenHalf, setLogos, setPhotos, startScoreFlash } from "./screens.js";
@@ -57,7 +62,6 @@ import { shrinkPhoto } from "./photo-image.js";
 import { PHOTO_PROBLEM } from "./photo-rules.js";
 import { loadPhotos, removePhoto, savePhoto } from "./photo-store.js";
 import { loadLogos, removeLogo, saveLogo } from "./logo-store.js";
-import { csvFileName, recordToCsv } from "./record-rules.js";
 import { cleanName } from "./squad-rules.js";
 import { addPlayer, loadSquad, removePlayer, renamePlayer } from "./squad-store.js";
 import { addTeam, deleteTeam, loadTeams, switchTeam, updateTeam } from "./team-store.js";
@@ -107,7 +111,7 @@ const state = {
   potdOpen: false, // The Player of the day picker (GDA-110). Never saved.
   undo: null, // After Swap, for about 5 seconds: { before, eventId, until }. Never saved.
   problem: "",
-  fileProblemFor: null, // The finished game whose Save file just failed.
+  justSaved: false, // GDA-186: true only on Full Time straight after End game and save; shows the "Game saved" line.
   teams: [], // Every team, oldest first (GDA-68).
   currentTeamId: null, // The team Home, Squad and Sheet settings show.
   firstTeamId: null, // What a record with no team ID belongs to.
@@ -247,7 +251,9 @@ function goTo(screen) {
   state.noteFor = null;
   state.noteDraft = null;
   state.potdOpen = false;
-  state.fileProblemFor = null;
+  if (screen !== "fullTime") {
+    state.justSaved = false; // The "Game saved" line goes once I leave Full Time.
+  }
   state.sheetResult = null;
   state.sheetDraft = null;
   state.deleteId = null;
@@ -538,14 +544,14 @@ async function saveUndo() {
 async function saveGoal(side, scorerId) {
   const game = openGame();
   state.goalOpen = false;
-  if (!game || !canAddGoal(game)) {
+  if (!game || !(canAddGoal(game) || canCorrectFinished(game))) {
     draw();
     return;
   }
   const goal = { id: crypto.randomUUID(), side, scorerId, at: Date.now() }; // `at` gives the minute within the half (GDA-82)
   saving = true;
   try {
-    await addGoal(db, state.gameId, goal);
+    await addGoal(db, state.viewId ?? state.gameId, goal);
     state.games = await gamesNow();
   } catch (error) {
     console.warn("Goal did not save", error);
@@ -566,7 +572,7 @@ async function saveGoalRemoval(goalId) {
   state.goalOpen = false;
   saving = true;
   try {
-    await removeGoal(db, state.gameId, goalId);
+    await removeGoal(db, state.viewId ?? state.gameId, goalId);
     state.games = await gamesNow();
   } catch (error) {
     console.warn("Goal removal did not save", error);
@@ -593,7 +599,7 @@ async function saveGoalFix(change) {
 async function saveGameChange(change) {
   saving = true;
   try {
-    await changeGame(db, state.gameId, change);
+    await changeGame(db, state.viewId ?? state.gameId, change);
     state.games = await gamesNow();
   } catch (error) {
     console.warn("Change did not save", error);
@@ -687,7 +693,7 @@ const actions = {
       return;
     }
     state.viewId = gameId;
-    goTo("half1");
+    goTo("fullTime"); // GDA-155: a finished game opens on Full Time; ‹ goes back through 2nd Half and 1st Half
   }),
   // GDA-149: leave a finished game being looked at, straight to Home. goTo("home") clears viewId; nothing is saved.
   closeGame: tap(() => {
@@ -740,6 +746,17 @@ const actions = {
     state.games = state.games.map((g) => (g.id === game.id ? withCarryOver(g, which, !carryValue(g, which)) : g));
     draw();
     changeGame(db, game.id, (g) => withCarryOver(g, which, !carryValue(game, which))).catch((error) => console.warn("Could not save the choice", error));
+  },
+  // GDA-177: a per-game display switch, saved at once; never touches the team default.
+  setDisplayChoice: (which) => {
+    const game = openGame();
+    if (!game) {
+      return;
+    }
+    const value = !(which === "showSeasonChart" ? showsSeasonChart(game, currentTeam()) : showsRotationCounts(game, currentTeam()));
+    state.games = state.games.map((g) => (g.id === game.id ? withDisplayChoice(g, which, value) : g));
+    draw();
+    changeGame(db, game.id, (g) => withDisplayChoice(g, which, value)).catch((error) => console.warn("Could not save the choice", error));
   },
   // GDA-88: the Home / Away / Other tag or the Field text, saved at once from the Game details sheet.
   changeVenue: (change) => {
@@ -847,13 +864,13 @@ const actions = {
   // GDA-91: removes the newest goal (either side); the dialog closes.
   undoLastGoal: tap(() => {
     const goal = lastGoal(openGame());
-    if (goal && canAddGoal(openGame())) {
+    if (goal && (canAddGoal(openGame()) || canCorrectFinished(openGame()))) {
       saveGoalRemoval(goal.id);
     }
   }),
-  // GDA-94: tap a goal in the Summary's timeline. Only before End game and save, never on a finished game.
+  // GDA-94: tap a goal in the Summary's timeline. Before End game and save, and (GDA-155) on a finished game.
   openGoalFix: tap((goalId) => {
-    if (!state.viewId && canEditNotes(openGame())) {
+    if (canCorrect(openGame())) {
       state.goalFixId = goalId;
       draw();
     }
@@ -944,6 +961,13 @@ const actions = {
     state.potdSort = sortAfterTap(state.potdSort, column);
     draw();
   }),
+  // GDA-155: the "Edit goals" link on a finished game's Full Time page opens the same Who scored? pop-up.
+  openEditGoals: tap(() => {
+    if (canCorrectFinished(openGame())) {
+      state.goalOpen = true;
+      draw();
+    }
+  }),
   sortTally: tap((column) => {
     state.tallySort = sortAfterTap(state.tallySort, column);
     draw();
@@ -1018,7 +1042,11 @@ const actions = {
   fullTime: tap(async () => {
     state.fullTimeAsk = false;
     const gameId = state.gameId;
-    await saveThenGoTo(() => fullTime(db, gameId), "saved", FULL_TIME_PROBLEM);
+    // GDA-186: on success stay on Full Time, now showing the finished game as when opened from Home, plus the "Game saved" line.
+    await saveThenGoTo(() => fullTime(db, gameId), "fullTime", FULL_TIME_PROBLEM, () => {
+      state.viewId = gameId;
+      state.justSaved = true;
+    });
     // One try only, after the game is safely saved. Never waits for it, never retries (GDA-47).
     if (state.games.find((g) => g.id === gameId)?.toSend) {
       sendToSheet(gameId);
@@ -1250,10 +1278,6 @@ const actions = {
     state.deleteId = null;
     saveThenGoTo(() => deleteGame(db, gameId), "home");
   }),
-  saveFile: tap((gameId) => {
-    state.menuId = null; // The menu closes when I choose an item.
-    saveFile(gameId);
-  }),
   applyUpdate: tap(() => applyUpdate()),
   tryAgain: tap(() => window.location.reload()),
 };
@@ -1296,7 +1320,7 @@ const presses = watchLineUpPresses({
   // Open from the line-up before kick-off (an Absent circle too) and in a running game; never on a saved game.
   canOpen: (spot) => {
     const game = openGame();
-    return spot.playerId !== undefined && readyForTaps() && screenHalf(state.screen) !== 0 && !state.viewId && state.noteFor === null && Boolean(game) && (canEditNotes(game) || game.state === NOT_STARTED);
+    return spot.playerId !== undefined && readyForTaps() && screenHalf(state.screen) !== 0 && (!state.viewId || canCorrectFinished(game)) && state.noteFor === null && Boolean(game) && (canCorrect(game) || game.state === NOT_STARTED);
   },
   async tapped(spot) {
     try {
@@ -1369,7 +1393,7 @@ async function startGame() {
  * next screen. The screen changes only once the change is safely stored, so the
  * clock cannot show one thing while the saved game says another.
  */
-async function saveThenGoTo(saveChange, screen, problem = SAVE_PROBLEM) {
+async function saveThenGoTo(saveChange, screen, problem = SAVE_PROBLEM, afterSave = null) {
   saving = true;
   try {
     await saveChange();
@@ -1382,6 +1406,7 @@ async function saveThenGoTo(saveChange, screen, problem = SAVE_PROBLEM) {
     return;
   }
   saving = false;
+  afterSave?.();
   goTo(screen);
 }
 
@@ -1417,25 +1442,6 @@ async function sendToSheet(gameId) {
   if (state.screen === "home") {
     draw();
   }
-}
-
-/**
- * Save file (Saved screen and Home): the CSV for one finished game, from its stored
- * record, through the phone's share / save panel. A failure never touches the game.
- */
-async function saveFile(gameId) {
-  const game = state.games.find((g) => g.id === gameId);
-  if (!game?.record) {
-    return;
-  }
-  state.fileProblemFor = null;
-  try {
-    await shareCsv(recordToCsv(game.record), csvFileName(game.record));
-  } catch (error) {
-    console.warn("Could not save the file", error);
-    state.fileProblemFor = gameId;
-  }
-  draw();
 }
 
 /** Reads the chosen file, checks all of it, then replaces everything in one transaction. */

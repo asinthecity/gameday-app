@@ -6,7 +6,7 @@
 
 import { hasRecord } from "./record-rules.js";
 import { trimmedLine } from "./drag.js";
-import { FINISHED, FIRST_HALF, SECOND_HALF, canPlan, IN_PROGRESS_PHASE, NOT_STARTED_PHASE, phaseOf, canStartHalf, canResumeHalf, halfLineUpView, nextScreen, lineupKey, canChangeWhoIsHere, startedAtOf, endedAtOf, canUndoKickOff, formationRowHalf, shownFormation, benchSeconds, benchTimerText, canCreateGame, VENUE_TAGS, venueLine, clockText, isBenchLate, ringFraction, planFigures, planFiguresFor, firstHalfFigures, firstHalfCopyOf, dotsFor, dotsLabel, formatGameDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, benchNumberOf, rotationSecondsOf, rotationText, ROTATION_EXTRA_SECONDS, snappedSeconds, clampRotation, halfOf, carriesRotationOrder, carriesBenchTime, canChangeCarryOver, MIN_ROTATION, MAX_ROTATION, NOT_STARTED, scoreOf, canAddGoal, scorerChoices, undoLineOf, lastGoal, US, canEditNotes, noteOf, potdOf, summaryOf, goalFixOf } from "./game-rules.js";
+import { finishedNewestFirst, FINISHED, FIRST_HALF, SECOND_HALF, canPlan, IN_PROGRESS_PHASE, NOT_STARTED_PHASE, phaseOf, canStartHalf, canResumeHalf, halfLineUpView, nextScreen, lineupKey, canChangeWhoIsHere, startedAtOf, endedAtOf, canUndoKickOff, formationRowHalf, shownFormation, benchSeconds, benchTimerText, canCreateGame, VENUE_TAGS, venueLine, clockText, isBenchLate, ringFraction, planFigures, planFiguresFor, firstHalfFigures, firstHalfCopyOf, dotsFor, dotsLabel, showsSeasonChart, showsRotationCounts, formatGameDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, benchNumberOf, rotationSecondsOf, rotationText, ROTATION_EXTRA_SECONDS, snappedSeconds, clampRotation, halfOf, carriesRotationOrder, carriesBenchTime, canChangeCarryOver, MIN_ROTATION, MAX_ROTATION, NOT_STARTED, scoreOf, canAddGoal, scorerChoices, undoLineOf, lastGoal, US, canEditNotes, canCorrect, canCorrectFinished, noteOf, potdOf, summaryOf, goalFixOf } from "./game-rules.js";
 import { TALLY_COLUMNS, interchangeRows, sortTally, tallyRows } from "./interchange-rules.js";
 import { LIST_COLUMNS, listBasedOn, listMeasure, listRows } from "./season-list-rules.js";
 import { AREAS, seasonTotals, potdListRows } from "./season-rules.js";
@@ -221,7 +221,6 @@ function gameCard(game, state, actions) {
   );
 }
 
-const FILE_PROBLEM = "Could not make the file. The game itself is saved. Try Save file again.";
 
 /** The Sheet line on a finished game (GDA-47): Sent / Sending / Not sent yet + Send now / Sheet not set up. */
 function sheetLine(game, state, actions) {
@@ -248,9 +247,8 @@ function sheetLine(game, state, actions) {
   ];
 }
 
-/** A finished game on Home: the result, its Sheet status and a ⋯ menu (Save file, Archive). No history screen. */
+/** A finished game on Home: the result, its Sheet status and a ⋯ menu (Archive). No history screen. */
 function finishedCard(game, state, actions) {
-  const failed = state.fileProblemFor === game.id;
   return h(
     "div",
     { class: "card finished", "data-game": game.id, onclick: (event) => {
@@ -267,17 +265,15 @@ function finishedCard(game, state, actions) {
       h("div", { class: "menuwrap" }, menuButton(game, actions))
     ),
     cardMenu(game, state, actions, [
-      h("button", { class: "mi saveFile", onclick: () => actions.saveFile(game.id) }, "Save file"),
       h("button", { class: "mi d archiveGame", onclick: () => actions.askArchive(game.id) }, "Archive"),
     ]),
-    ...sheetLine(game, state, actions),
-    failed ? h("p", { class: "problem", role: "alert" }, FILE_PROBLEM) : null
+    ...sheetLine(game, state, actions)
   );
 }
 
 const ARCHIVE_WARNINGS = {
-  notInSheet: "Warning: this game is not in the Sheet yet. Tap Cancel, then Send now or Save file first.",
-  noStatus: "Warning: this older game has no Sheet record. Tap Cancel and Save file first.",
+  notInSheet: "Warning: this game is not in the Sheet yet. Tap Cancel, then Send now or back up first.",
+  noStatus: "Warning: this older game has no Sheet record. Tap Cancel, then Send now or back up first.",
 };
 
 /** "Archive v Eagles from the list?" with one confirm and, if the game is not in the Sheet, a red warning (GDA-69). */
@@ -427,6 +423,11 @@ function teamFormScreen(state, actions) {
           formationBox({ size: () => Number(form.values.size), shown: defaults.formation, disabled: false, onValid: (formation) => { defaults.formation = formation; } })
         ),
         carryOverSwitches(defaults, false, { toggleCarryOver: (which) => { defaults[which] = !defaults[which]; } }),
+        // GDA-177: what is drawn on the pitch; each game can still change its own in Game settings.
+        setCard(
+          displaySwitch("showSeasonChart", "Season chart on line-up", defaults.showSeasonChart, () => { defaults.showSeasonChart = !defaults.showSeasonChart; }),
+          displaySwitch("showRotationCounts", "Rotation counts", defaults.showRotationCounts, () => { defaults.showRotationCounts = !defaults.showRotationCounts; })
+        ),
         adding ? null : h("p", { class: "hint" }, "Size, half length and default game settings apply to new games only. Existing games keep theirs."),
         problemLine(state.problem),
         h("button", { class: "btn pri big", id: "saveTeam", onclick: actions.saveTeam }, "Save"),
@@ -452,7 +453,7 @@ function deleteTeamSheet(state, actions, refusal) {
       { class: "sheet" },
       h("h2", {}, `Delete team ${team.name}?`),
       h("p", { id: "deleteTeamCounts" }, `This erases ${plural(counts.players, "player")}, ${plural(counts.games, "game")} (archived games included), and their events. It can't be undone.`),
-      counts.notInSheet > 0 && sheetConnected(state.sheetSettings) ? h("p", { class: "problem", id: "deleteTeamWarn" }, `${counts.notInSheet} of these games are not in the Sheet. Tap Cancel and Save file or Send now first.`) : null,
+      counts.notInSheet > 0 && sheetConnected(state.sheetSettings) ? h("p", { class: "problem", id: "deleteTeamWarn" }, `${counts.notInSheet} of these games are not in the Sheet. Tap Cancel, then Send now or back up first.`) : null,
       h("button", { class: "btn del", id: "confirmDeleteTeam", onclick: actions.confirmDeleteTeam }, "Delete team"),
       h("button", { class: "btn", id: "cancelDeleteTeam", onclick: actions.cancelDeleteTeam }, "Cancel")
     )
@@ -529,8 +530,8 @@ function homeScreen(state, actions) {
     ? h("button", { class: "btn pri big", onclick: actions.openCreateGame }, "+ Create game")
     : null;
   const cards = state.games.filter((game) => game.state !== FINISHED).map((game) => gameCard(game, state, actions));
-  // Finished games with a record keep one Save file button. Old test games (no record) stay hidden.
-  const finished = state.games.filter((game) => hasRecord(game) && !game.archived).map((game) => finishedCard(game, state, actions));
+  // Finished games with a record keep their card. Old test games (no record) stay hidden.
+  const finished = finishedNewestFirst(state.games.filter((game) => hasRecord(game) && !game.archived)).map((game) => finishedCard(game, state, actions));
   const addPlayers = hasPlayers
     ? []
     : [
@@ -921,7 +922,8 @@ function playerSlot(player, state, canMove, isKeeper = false, benchTimer = false
   const figures = afterHalf ? firstHalfFigures(openGame(state)) : screenHalf(state.screen) === 2 && started ? planFigures(openGame(state), Date.now()) : null;
   const shown = figures ? planFiguresFor(figures, player.id, onPitch) : null;
   const dotData = !started || !player.id ? null : afterHalf ? openGame(state).firstHalfDotTurns : figures || (screenHalf(state.screen) === 2) === (lineupKey(openGame(state)) === "secondHalf") ? openGame(state).dotTurns : null;
-  const dots = dotData ? dotRow(dotsFor(dotData, player.id, number)) : null;
+  const countsOn = !dotData || showsRotationCounts(openGame(state), currentTeamOf(state)); // GDA-177: Off hides the whole row (dots, glove dot, bench number); the turns are still counted
+  const dots = dotData && countsOn ? dotRow(dotsFor(dotData, player.id, number)) : null;
   // Plan bench: the existing bench ring, filled to the spell running at the whistle, and the .tm tag (none if not on the bench then).
   const planBench = shown && !onPitch && (!benchTimer || afterHalf);
   // GDA-116: the 1st half's bench circles are drawn as it ended and do not tick (no data-plan-bench, so drawBenchTimers leaves them).
@@ -936,11 +938,11 @@ function playerSlot(player, state, canMove, isKeeper = false, benchTimer = false
       class: ["slot", planned ? "plan" : "", isKeeper ? "keeper" : "", planBench && shown.seconds !== null && ringFraction(shown.seconds, rotation) >= PILL_WHITE_FROM ? "wh" : ""].join(" ").trim(),
       ...(planBench && shown.seconds !== null ? { style: `--wait-fade: ${ringFraction(shown.seconds, rotation).toFixed(3)}` } : {}), // GDA-160: ring and tag colour for a frozen plan circle
       ...(canMove ? { "data-player": player.id } : {}),
-      ...(!state.viewId && (canEditNotes(openGame(state)) || (openGame(state).state === NOT_STARTED && !openGame(state).absent.includes(player.id))) ? { "data-note": player.id } : {}), // GDA-81/109: can be held for the profile (not an Absent circle, not a saved game)
+      ...((!state.viewId || canCorrectFinished(openGame(state))) && (canCorrect(openGame(state)) || (openGame(state).state === NOT_STARTED && !openGame(state).absent.includes(player.id))) ? { "data-note": player.id } : {}), // GDA-81/109: can be held for the profile (not an Absent circle, not a saved game)
       ...(planBench && !afterHalf ? { "data-plan-bench": player.id } : {}), // GDA-107: the plan's bench circles move with the 1st half
       ...(benchTimer ? { "data-bench": player.id } : {}), // Marks a timer circle; it is not draggable.
     },
-    h("div", { class: dots ? "ci dotted" : "ci" }, avatar(player), isKeeper && !started ? h("span", { class: "gkb", "aria-hidden": "true" }, icon("glove")) : null, chartLevels && !started && chartLevels.has(player.id) ? seasonChart(chartLevels.get(player.id)) : null, benchTimer && !afterHalf ? ring(dims, 0) : planBench || (afterHalf && benchTimer) ? ring(dims, !shown || shown.seconds === null ? 0 : ringFraction(shown.seconds, rotation)) : null, dots, planTag, benchTimer && !afterHalf ? h("div", { class: "tm" }) : planBench && shown.seconds !== null ? h("div", { class: "tm" }, benchTimerText(shown.seconds)) : null), // Bench time: a small tag at the circle's bottom-right; drawBenchTimers fills it.
+    h("div", { class: dotData ? "ci dotted" : "ci" }, avatar(player), isKeeper && !started ? h("span", { class: "gkb", "aria-hidden": "true" }, icon("glove")) : null, chartLevels && !started && chartLevels.has(player.id) ? seasonChart(chartLevels.get(player.id)) : null, benchTimer && !afterHalf ? ring(dims, 0) : planBench || (afterHalf && benchTimer) ? ring(dims, !shown || shown.seconds === null ? 0 : ringFraction(shown.seconds, rotation)) : null, dots, planTag, benchTimer && !afterHalf ? h("div", { class: "tm" }) : planBench && shown.seconds !== null ? h("div", { class: "tm" }, benchTimerText(shown.seconds)) : null), // Bench time: a small tag at the circle's bottom-right; drawBenchTimers fills it.
     nameLine
   );
 }
@@ -1104,7 +1106,7 @@ function planBody(game, view, state, actions, { editable, firstHalf, note, overl
   }
   // GDA-57: before kick-off the circles of players who are here carry the season chart (Absent circles do not: their row is built without it).
   // Before kick-off the 2nd half plan shows it too (GDA-109); once the game has kicked off the half time plan has none.
-  const totals = (firstHalf ? editable : !gameHasKickedOff(game)) ? seasonTotals({ games: state.games, players: state.players, eventsByGame: {} }).players : null;
+  const totals = (firstHalf ? editable : !gameHasKickedOff(game)) && showsSeasonChart(game, currentTeamOf(state)) ? seasonTotals({ games: state.games, players: state.players, eventsByGame: {} }).players : null;
   chartLevels = totals ? new Map([...totals].map(([id, season]) => [id, season.level])) : null;
   const rows = pitchAndBench(view, state, editable, crowded, false, editable && firstHalf, overlay, actions, viewSwitch(state, actions));
   chartLevels = null; // the ABSENT row below has no chart
@@ -1322,6 +1324,11 @@ function undoKickOffRow(state, game, actions) {
   );
 }
 
+/** GDA-177: one native switch row for a "what is drawn" choice (Team settings default, or Game settings for one game). */
+function displaySwitch(which, text, on, onchange) {
+  return h("label", { class: "swrow", id: "ds-" + which }, h("span", {}, text), h("input", { type: "checkbox", switch: "", id: "dsi-" + which, checked: on, onchange }));
+}
+
 /**
  * GDA-86: the two "Carry over" switches, as native `<input type="checkbox" switch>` (the real iOS switch on
  * iOS Safari 17.4+, a plain checkbox elsewhere). The whole label row is the tap target. Once the 2nd half
@@ -1371,7 +1378,10 @@ function gameDetailsSheet(state, game, actions) {
         formationRow(game, actions),
         hereRow(state, game, actions),
         interchangeRow(actions),
-        potdSettingsRow(state, game, actions)
+        potdSettingsRow(state, game, actions),
+        // GDA-177: only the row that matters now: the season chart before kick-off, the rotation counts from kick-off until saved.
+        game.state === NOT_STARTED ? displaySwitch("showSeasonChart", "Season chart on line-up", showsSeasonChart(game, currentTeamOf(state)), () => actions.setDisplayChoice("showSeasonChart")) : null,
+        canEditNotes(game) ? displaySwitch("showRotationCounts", "Rotation counts", showsRotationCounts(game, currentTeamOf(state)), () => actions.setDisplayChoice("showRotationCounts")) : null
       ),
       // GDA-86, GDA-105: on both half screens (editable until the 2nd half starts, read-only after).
       carryOverSwitches(carryValuesOf(game), !canChangeCarryOver(game), actions),
@@ -1540,7 +1550,7 @@ function halfScreen(state, actions) {
  * Every action (a goal, Undo last goal, Cancel) closes it.
  */
 function goalDialog(state, game, actions) {
-  if (!state.goalOpen || !canAddGoal(game)) {
+  if (!state.goalOpen || !(canAddGoal(game) || canCorrectFinished(game))) {
     return null;
   }
   const players = scorerChoices(game, state.players, game.played);
@@ -1561,7 +1571,7 @@ function goalDialog(state, game, actions) {
     onToggle: actions.chooseScorer,
     onCancel: actions.closeGoalDialog,
     // GDA-108: opens the Summary (the clock keeps running); Back there returns to the game with this pop-up closed.
-    headAction: h("button", { class: "pkx txt", id: "openSummary", onclick: actions.openSummary }, "Summary"),
+    headAction: canCorrectFinished(game) ? null : h("button", { class: "pkx txt", id: "openSummary", onclick: actions.openSummary }, "Summary"), // GDA-155: on a finished game you are already on Full Time
     gridTail: ownGoal,
     middle: h("div", { class: "gagainst" }, h("button", { class: "btn", id: "goalThem", onclick: actions.goalAgainst }, "Opposition goal")),
     footer: h(
@@ -1845,7 +1855,7 @@ function scorePanel(ourName, ourLogo, theirName, score) {
  * `canChoose` is true before End game and save; a finished game shows the page locked (no row if nobody was chosen).
  * Used by the mid-game Summary, the Full Time screen and a finished game opened from Home.
  */
-function summaryBody(state, game, actions, { canChoose, soFar }) {
+function summaryBody(state, game, actions, { canChoose, soFar, editGoals = false }) {
   const team = state.teams.find((t) => t.id === (game.teamId ?? state.currentTeamId));
   const ourName = team?.name ?? "Our team";
   const summary = summaryOf(game, state.players);
@@ -1858,8 +1868,8 @@ function summaryBody(state, game, actions, { canChoose, soFar }) {
   return [
     soFar ? h("div", { class: "lbl", id: "fullTimeTitle" }, "Score so far") : null,
     scorePanel(ourName, currentLogos[team?.id], game.opposition, summary.score),
-    summary.goals.length > 0
-      ? h("div", { class: "card", id: "timeline" }, ...summary.goals.map((g) => h(canChoose ? "button" : "div", { class: g.side === US ? "tl" : "tl them", ...(canChoose ? { type: "button", "data-goal": g.id, onclick: () => actions.openGoalFix(g.id) } : {}) }, h("span", { class: "t" }, g.when), h("span", { class: "ball" }, icon("ball")), h("span", { class: g.side === US ? "" : "ro" }, g.who))))
+    summary.goals.length > 0 || editGoals
+      ? h("div", { class: "card", id: "timeline" }, ...summary.goals.map((g) => h(canChoose ? "button" : "div", { class: g.side === US ? "tl" : "tl them", ...(canChoose ? { type: "button", "data-goal": g.id, onclick: () => actions.openGoalFix(g.id) } : {}) }, h("span", { class: "t" }, g.when), h("span", { class: "ball" }, icon("ball")), h("span", { class: g.side === US ? "" : "ro" }, g.who))), editGoals ? h("button", { class: "elink", type: "button", id: "editGoals", onclick: actions.openEditGoals }, "Edit goals") : null)
       : null,
     summary.notes.length > 0 ? h("div", { class: "card nt", id: "notesCard" }, ...summary.notes.map((n) => h("div", {}, h("b", {}, n.name), " ", n.text))) : null,
     potdRow,
@@ -1951,20 +1961,23 @@ function fullTimeHead(state, actions) {
 function fullTimeScreen(state, actions) {
   const game = openGame(state);
   const open = !state.viewId;
+  const corrects = Boolean(state.viewId) && canCorrectFinished(game); // GDA-155: a finished game can still be corrected
   return {
     nodes: [
       fullTimeHead(state, actions),
       h(
         "div",
         { class: "body" },
-        ...summaryBody(state, game, actions, { canChoose: open && canEditNotes(game), soFar: false }),
+        state.justSaved ? h("p", { class: "hint", id: "gameSaved", role: "status" }, "Game saved") : null, // GDA-186: only straight after saving
+        ...summaryBody(state, game, actions, { canChoose: open ? canEditNotes(game) : corrects, soFar: false, editGoals: corrects }),
         problemLine(state.problem),
         // GDA-120: Settings sits bottom-left, End game and save takes the rest of the row.
         h("div", { class: "endrow" }, settingsButton(actions), open ? h("button", { class: "btn pri big", id: "fullTime", onclick: actions.askFullTime }, "End game and save") : h("button", { class: "btn big", id: "closeGameBottom", onclick: actions.closeGame }, "Close game"))
       ),
       gameDetailsSheet(state, game, actions),
       state.fullTimeAsk ? fullTimeSheet(actions) : null,
-      open ? potdPicker(state, game, actions) : null,
+      open || corrects ? potdPicker(state, game, actions) : null,
+      corrects ? goalDialog(state, game, actions) : null,
     ],
   };
 }
@@ -2129,7 +2142,7 @@ function potdHeadings(state, actions) {
 }
 
 function potdPicker(state, game, actions) {
-  if (!state.potdOpen || !canEditNotes(game)) {
+  if (!state.potdOpen || !canCorrect(game)) {
     return null;
   }
   const totals = seasonTotals({ games: state.games, players: state.players, eventsByGame: {} });
@@ -2215,7 +2228,7 @@ function noteSheet(state, game, actions) {
   if (state.noteFor === null || !player) {
     return null;
   }
-  const inGame = canEditNotes(game);
+  const inGame = canCorrect(game);
   const done = h("button", { class: "btn pri big", id: "noteDone", onclick: actions.closeNote }, "Done");
   // GDA-109: three more ways to close, all saving exactly as Done does: this X, a tap on the grey background, a swipe down (main.js).
   const head = h("div", { class: "phd" }, avatar(player), h("h2", {}, player.name), h("button", { class: "arrow", id: "noteClose", "aria-label": "Close", onclick: actions.closeNote }, icon("close")));
@@ -2250,26 +2263,6 @@ function noteSheet(state, game, actions) {
   );
 }
 
-/** Saved (GDA-50): the record is stored. Save file offers the CSV; Done goes Home. */
-function savedScreen(state, actions) {
-  const game = state.games.find((g) => g.id === state.gameId);
-  const record = game?.record;
-  return {
-    nodes: [
-      header("Game saved"),
-      h(
-        "div",
-        { class: "body" },
-        h("div", { class: "bigscore", id: "finalScore" }, record ? `${record.us} - ${record.them}` : ""),
-        h("p", {}, "Your game is safe on this phone. No swap, goal or Undo can be reached now. You can save the file later from Home."),
-        state.fileProblemFor === game?.id ? h("p", { class: "problem", role: "alert" }, FILE_PROBLEM) : null,
-        h("button", { class: "btn big saveFile", onclick: () => actions.saveFile(game.id) }, state.fileProblemFor === game?.id ? "Save file again" : "Save file"),
-        h("button", { class: "btn pri big", id: "done", onclick: actions.goHome }, "Done")
-      ),
-    ],
-  };
-}
-
 function cannotOpenScreen(state, actions) {
   return {
     nodes: [
@@ -2296,7 +2289,6 @@ const SCREENS = {
   fullTime: fullTimeScreen,
   summary: summaryScreen,
   interchange: interchangeScreen,
-  saved: savedScreen,
   sheetSettings: sheetSettingsScreen,
   teamForm: teamFormScreen,
   cannotOpen: cannotOpenScreen,
