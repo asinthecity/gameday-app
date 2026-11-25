@@ -87,8 +87,8 @@ function emptyLineUp(places = POSITION_COUNT) {
 /**
  * The saved game. Later stories build on this shape:
  * - `id` never changes. It is random rather than 1, 2, 3 so that it stays unique
- *   even if the phone's data is lost and counting would start again: the Sheet
- *   uses it to skip games it already holds. Event log entries will point to it.
+ *   even if the phone's data is lost and counting would start again: a game is never mistaken
+ *   for another one. Event log entries will point to it.
  * - `lineups` has one line-up per half. `positions` holds player ids, or null for
  *   an empty place. The bench is whoever is neither placed nor absent.
  *   So a player added to the squad is on the bench with nothing to save.
@@ -1067,6 +1067,12 @@ export function formatGameDate(date) {
   return `${DAYS[calendarDay.getUTCDay()]} ${day} ${MONTHS[month - 1]}`;
 }
 
+/** GDA-187: "15 Nov", without the day name (games are always on the same day of the week; Ben, 2026-11-25). */
+export function formatShortDate(date) {
+  const [, month, day] = date.split("-").map(Number);
+  return `${day} ${MONTHS[month - 1]}`;
+}
+
 /** "08:30" becomes "8:30 am". Written out by hand so the phone's region cannot change it. */
 export function formatKickOff(kickOff) {
   const [hours, minutes] = kickOff.split(":");
@@ -1738,4 +1744,21 @@ export function summaryOf(game, players, nameLookup) {
     .map(([id, text]) => ({ name: nameOf(Number(id)) ?? nameOf(id) ?? "Player", text }))
     .sort((a, b) => a.name.localeCompare(b.name));
   return { score: scoreOf(game), goals, notes, potd: potdOf(game) === null ? null : nameOf(potdOf(game)) };
+}
+
+// ---- Delete and Archive (moved here from the removed Sheet rules, GDA-189) ----
+
+/** Delete is offered only before START 1ST HALF has been tapped (GDA-66). */
+export function canDeleteGame(game) {
+  return game.state === "not started";
+}
+
+/** Archive is offered only on a finished game (one with a record) not already archived (GDA-69). */
+export function canArchiveGame(game) {
+  return Boolean(game.record) && !game.archived;
+}
+
+/** The game with the "archived" flag set. Nothing is erased or sent. A game that cannot be archived is returned as it is. */
+export function gameArchived(game) {
+  return canArchiveGame(game) ? { ...game, archived: true } : game;
 }
