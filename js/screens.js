@@ -5,9 +5,9 @@
 // containing < or & just shows as typed.
 
 import { trimmedLine } from "./drag.js";
-import { canDeleteGame, canArchiveGame, FINISHED, FIRST_HALF, SECOND_HALF, canPlan, IN_PROGRESS_PHASE, NOT_STARTED_PHASE, phaseOf, canStartHalf, canResumeHalf, halfLineUpView, nextScreen, lineupKey, canChangeWhoIsHere, startedAtOf, endedAtOf, canUndoKickOff, formationRowHalf, shownFormation, benchSeconds, benchTimerText, canCreateGame, VENUE_TAGS, venueLine, clockText, isBenchLate, ringFraction, planFigures, planFiguresFor, firstHalfFigures, firstHalfCopyOf, dotsFor, dotsLabel, showsSeasonChart, showsRotationCounts, formatGameDate, formatShortDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, benchNumberOf, rotationSecondsOf, rotationText, ROTATION_EXTRA_SECONDS, snappedSeconds, clampRotation, halfOf, carriesRotationOrder, carriesBenchTime, canChangeCarryOver, MIN_ROTATION, MAX_ROTATION, NOT_STARTED, scoreOf, canAddGoal, scorerChoices, undoLineOf, lastGoal, US, canEditNotes, canCorrect, canCorrectFinished, noteOf, potdOf, summaryOf, goalFixOf } from "./game-rules.js";
+import { canDeleteGame, canArchiveGame, FINISHED, FIRST_HALF, SECOND_HALF, canPlan, IN_PROGRESS_PHASE, NOT_STARTED_PHASE, phaseOf, canStartHalf, canResumeHalf, halfLineUpView, nextScreen, lineupKey, canChangeWhoIsHere, startedAtOf, endedAtOf, canUndoKickOff, canRestartGame, formationRowHalf, shownFormation, benchSeconds, benchTimerText, canCreateGame, VENUE_TAGS, venueLine, clockText, isBenchLate, ringFraction, planFigures, planFiguresFor, firstHalfFigures, firstHalfCopyOf, dotsFor, dotsLabel, showsSeasonChart, showsRotationCounts, formatGameDate, formatShortDate, formatKickOff, isBlank, isTimeUp, lineUpView, swapMessage, pairsOf, benchNumberOf, rotationSecondsOf, rotationText, ROTATION_EXTRA_SECONDS, snappedSeconds, clampRotation, halfOf, carriesRotationOrder, carriesBenchTime, canChangeCarryOver, MIN_ROTATION, MAX_ROTATION, NOT_STARTED, scoreOf, canAddGoal, scorerChoices, undoLineOf, lastGoal, US, canEditNotes, canCorrect, canCorrectFinished, noteOf, potdOf, summaryOf, goalFixOf } from "./game-rules.js";
 import { TALLY_COLUMNS, interchangeRows, sortTally, tallyRows } from "./interchange-rules.js";
-import { LIST_COLUMNS, listBasedOn, listMeasure, listRows } from "./season-list-rules.js";
+import { LIST_COLUMNS, listMeasure, listRows } from "./season-list-rules.js";
 import { AREAS, seasonTotals, potdListRows } from "./season-rules.js";
 import { gamesPlayed, goalDifferenceText, historyRows, resultRows, teamRecord } from "./history-rules.js";
 import { checkFormation, formatFormationDigits, formationOf, pitchRows } from "./formation-rules.js";
@@ -23,6 +23,9 @@ const ICONS = {
   // Back arrow (GDA-75) and End half flag.
   back: ["M15 5l-7 7 7 7"],
   next: ["M9 5l7 7-7 7"],
+  // GDA-211: the Home team-switch chevron, drawn like back and next (no font size).
+  chevDown: ["M6 9l6 6 6-6"],
+  chevUp: ["M6 15l6-6 6 6"],
   close: ["M6 6l12 12", "M18 6L6 18"], // GDA-149: Close game on a finished game's Full Time page
   // GDA-166: stopwatch with a tick inside the face (Full time).
   stopwatch: ["M12 6a8 8 0 1 0 0 16a8 8 0 1 0 0-16", "M10 2.5h4", "M12 2.5V6", "M18.5 7l1.5-1.5", "M8.5 14.3l2.4 2.4 4.6-5"],
@@ -141,7 +144,7 @@ function navArrows(state, actions, nextGo = false) {
   let next = arrowButton("next", hasNext ? actions.goNext : null, toFullTime ? { iconName: "stopwatch", label: "Full time" } : {});
   if (state.screen === "fullTime" && state.viewId) {
     // GDA-149: a finished game looked at from Home: the inactive next arrow becomes Close game (same 44px slot).
-    next = h("button", { class: "arrow", id: "closeGameTop", "aria-label": "Close game", onclick: actions.closeGame }, icon("close"));
+    next = h("button", { class: "back", id: "closeGameTop", "aria-label": "Close game", onclick: actions.closeGame }, icon("close"));
   }
   if (nextGo) {
     next.classList.add("go"); // GDA-120: at Half Time the next arrow is the solid dark "go" style
@@ -150,9 +153,9 @@ function navArrows(state, actions, nextGo = false) {
 }
 
 /** The top row of a screen with no clock: arrow, title (and a small state tag), arrow. Same box as the game header card. */
-function navBar(title, tag, state, actions) {
+function navBar(title, tag, state, actions, pinned = false) {
   const [back, next] = navArrows(state, actions);
-  return h("div", { class: "clk bar" }, back, h("h1", {}, title), tag ? h("span", { class: "tag" }, tag) : null, next);
+  return h("div", { class: pinned ? "clk bar ctr pinned" : "clk bar ctr" }, back, h("h1", {}, title), tag ? h("span", { class: "tag" }, tag) : null, next);
 }
 
 /** The player's photo if they have one (GDA-52), otherwise their coloured initials. */
@@ -211,7 +214,7 @@ function archiveSheet(state, actions) {
       { class: "sheet" },
       h("h2", {}, `Archive v ${game.opposition}?`),
       h("p", { class: "archiveNote" }, "It will no longer count in the season figures, Season history or the export. It stays saved on this phone."),
-      h("button", { class: "btn del", id: "confirmArchive", onclick: actions.confirmArchive }, "Archive"),
+      h("button", { class: "btn pri", id: "confirmArchive", onclick: actions.confirmArchive }, "Archive"),
       h("button", { class: "btn", id: "cancelArchive", onclick: actions.cancelArchive }, "Cancel")
     )
   );
@@ -313,7 +316,13 @@ function teamFormScreen(state, actions) {
     ? null
     : refusal === "only"
       ? h("p", { class: "hint", id: "onlyTeam" }, LAST_TEAM_MESSAGE)
-      : h("button", { class: "btn redtext", id: "deleteTeam", onclick: actions.askDeleteTeam }, "Delete team");
+      : h(
+          "div",
+          {},
+          // GDA-208: plain style (not red), just above Delete team. Not offered for the only team (that case is the hint above).
+          h("button", { class: "btn gapbig", id: "archiveTeam", onclick: actions.askArchiveTeam }, "Archive team"),
+          h("button", { class: "btn redtext", id: "deleteTeam", onclick: actions.askDeleteTeam }, "Delete team")
+        );
   return {
     nodes: [
       header(adding ? "Add team" : "Team settings", actions.cancelTeamForm),
@@ -352,6 +361,7 @@ function teamFormScreen(state, actions) {
         deleteArea ? h("div", { class: "gapbig" }, deleteArea) : null
       ),
       state.deleteTeamOpen ? deleteTeamSheet(state, actions, refusal) : null,
+      state.archiveTeamOpen ? archiveTeamSheet(state, actions, refusal) : null,
     ].filter(Boolean),
   };
 }
@@ -378,6 +388,26 @@ function deleteTeamSheet(state, actions, refusal) {
   );
 }
 
+/** GDA-208: the Archive team confirm, or the refusal when a game is in progress in that team. */
+function archiveTeamSheet(state, actions, refusal) {
+  const team = state.teams.find((t) => t.id === state.currentTeamId);
+  if (refusal) {
+    return h("div", { class: "scrim", id: "archiveTeamConfirm" }, h("div", { class: "sheet" }, h("h2", {}, `Can't archive ${team.name}`), h("p", { class: "refuse" }, IN_PROGRESS_REFUSAL + "."), h("button", { class: "btn", id: "cancelArchiveTeam", onclick: actions.cancelArchiveTeam }, "OK")));
+  }
+  return h(
+    "div",
+    { class: "scrim", id: "archiveTeamConfirm" },
+    h(
+      "div",
+      { class: "sheet" },
+      h("h2", {}, `Archive ${team.name}?`),
+      h("p", { id: "archiveTeamText" }, "The team leaves the team list. Its players and games stay saved on this phone and still go into Back up data and Export to spreadsheet. You can bring it back from Archived teams."),
+      h("button", { class: "btn pri", id: "confirmArchiveTeam", onclick: actions.confirmArchiveTeam }, "Archive team"),
+      h("button", { class: "btn", id: "cancelArchiveTeam", onclick: actions.cancelArchiveTeam }, "Cancel")
+    )
+  );
+}
+
 /** The team line on Home's white team card (GDA-157, GDA-185): crest, name, "N players" and a bare ▾. The whole line is one tap target that opens the team list. */
 function teamLine(state, actions) {
   const team = currentTeamOf(state);
@@ -389,7 +419,7 @@ function teamLine(state, actions) {
     { class: "team", id: "teamLine", "aria-label": `Team: ${team.name}. Change team`, onclick: actions.openTeamList },
     teamLogo(team.name, currentLogos[state.currentTeamId], "homeLogo"),
     h("span", { class: "tx" }, h("b", {}, team.name), h("span", { class: "tsize" }, plural(state.players.length, "player"))),
-    h("span", { class: "chev", "aria-hidden": "true" }, state.teamListOpen ? "\u25b4" : "\u25be")
+    h("span", { class: "chev", "aria-hidden": "true" }, icon(state.teamListOpen ? "chevUp" : "chevDown"))
   );
 }
 
@@ -405,6 +435,13 @@ function teamMenuItems(state, actions) {
     locked ? h("div", { class: "mlock", id: "teamLock" }, LOCKED_MESSAGE) : null,
     ...items,
     h("button", { class: "mi addTeam", disabled: locked, onclick: actions.openAddTeam }, "+ Add team"),
+    // GDA-208: only once a team is archived. Tapping it shows the archived teams; tapping one brings it back and makes it current.
+    state.archivedTeams.length ? h("button", { class: "mi archivedTeams", id: "archivedTeams", disabled: locked, onclick: actions.openArchivedTeams }, `Archived teams (${state.archivedTeams.length})`) : null,
+    ...(state.archivedListOpen && !locked
+      ? state.archivedTeams.map((team) =>
+          h("button", { class: "mi teamItem", "data-archived-team": team.id, onclick: () => actions.bringBackTeam(team.id) }, h("span", { class: "tickCol" }), teamLogo(team.name, currentLogos[team.id], "rowLogo"), h("span", { class: "tmName" }, team.name, h("span", { class: "tsize" }, ` \u00b7 ${team.playersPerSide} a side`)))
+        )
+      : []),
   ].filter(Boolean);
 }
 
@@ -477,7 +514,7 @@ function homeScreen(state, actions) {
         h("div", { class: "exportHint" }, EXPORT_HINT),
         // GDA-153: one file with everything on the phone.
         h("button", { class: "mi backUpData", onclick: actions.backUpData }, "Back up data"),
-        h("button", { class: "mi restoreData", onclick: actions.askRestore }, "Restore data"),
+        h("button", { class: "mi d restoreData", onclick: actions.askRestore }, "Restore data"),
         h("div", { class: "ver" }, `Version ${self.GAMEDAY_VERSION}`)
       )
     )
@@ -738,7 +775,7 @@ function createGameScreen(state, actions) {
   const text = { type: "text", autocomplete: "off", autocapitalize: "words", autocorrect: "off", spellcheck: "false" };
   return {
     nodes: [
-      h("div", { class: "clk bar" }, arrowButton("back", actions.leaveCreateGame), h("h1", {}, "New game"), nextArrow),
+      h("div", { class: "clk bar ctr" }, arrowButton("back", actions.leaveCreateGame), h("h1", {}, "New game"), nextArrow),
       h(
         "div",
         { class: "body" },
@@ -772,20 +809,22 @@ function createGameScreen(state, actions) {
 }
 
 /**
- * New game once the game exists (GDA-95): this game's details, read-only. They are changed in the
- * cog's Game details on the half screens. Back goes Home; Next goes to the 1st Half.
+ * The game details page (GDA-95, GDA-210): this game's details and all its settings. Reached with ‹ from the 1st Half (the
+ * 2nd Half goes via the 1st). Every setting is changeable exactly when it was in the old cog sheet (game-rules.js decides),
+ * and a game that is running keeps running underneath. Delete game is at the bottom, before kick-off only.
  */
 function newGameScreen(state, actions) {
   const game = openGame(state);
+  const finished = game.state === FINISHED;
   return {
     nodes: [
-      navBar(gameHasKickedOff(game) ? "Game details" : "New game", null, state, actions),
+      navBar("Game details", null, state, actions, true), // GDA-210: pinned while the page scrolls
       h(
         "div",
         { class: "body" },
         setCard(
           // GDA-199: editable until Full Time, read-only after.
-          ...(game.state === FINISHED
+          ...(finished
             ? [
                 factRow("Date", formatGameDate(game.date), "ngDate"),
                 factRow("Kick-off", formatKickOff(game.kickOff), "ngKickOff"),
@@ -797,15 +836,30 @@ function newGameScreen(state, actions) {
                 detailEditor(game, "opposition", "Opposition", { type: "text", autocomplete: "off", autocapitalize: "words", autocorrect: "off", spellcheck: "false" }, actions),
               ]),
           // GDA-105: Home / Away and Field are changed here (they used to be in the cog sheet); locked after Full Time.
-          ...(game.state === FINISHED
+          ...(finished
             ? [factRow("Home or away", game.venueTag || "Not set", "ngVenueTag"), factRow("Field", game.venue || "Not set", "ngVenue")]
-            : venueEditor(game, actions)),
-          factRow("Rotation", rotationText(rotationSecondsOf(game)), "ngRotation"),
-          factRow("Half length", `${halfOf(game)} min`, "halfInfo"),
-          formationRow(game, actions)
+            : venueEditor(game, actions))
         ),
-        carryOverSwitches(carryValuesOf(game), !canChangeCarryOver(game), actions)
+        setCard(
+          factRow("Half length", `${halfOf(game)} min`, "halfInfo"),
+          // GDA-210: the rotation length picker (same picker and limits as the old cog sheet), read-only once the game is saved.
+          finished
+            ? factRow("Rotation", rotationText(rotationSecondsOf(game)), "ngRotation")
+            : h("div", { class: "setrow" }, h("span", {}, "Rotation length"), rotationPicker(clampRotation(game.rotationMinutes ?? 6, halfOf(game)), snappedSeconds(game.rotationExtraSeconds, clampRotation(game.rotationMinutes ?? 6, halfOf(game)), halfOf(game)), halfOf(game), actions.setRotation)),
+          formationRow(game, actions),
+          hereRow(state, game, actions),
+          // GDA-177: only the row that matters now: the season chart before kick-off, the rotation counts from kick-off until saved.
+          game.state === NOT_STARTED ? displaySwitch("showSeasonChart", "Season chart on line-up", showsSeasonChart(game, currentTeamOf(state)), () => actions.setDisplayChoice("showSeasonChart")) : null,
+          canEditNotes(game) ? displaySwitch("showRotationCounts", "Rotation counts", showsRotationCounts(game, currentTeamOf(state)), () => actions.setDisplayChoice("showRotationCounts")) : null
+        ),
+        carryOverSwitches(carryValuesOf(game), !canChangeCarryOver(game), actions),
+        // Set apart at the bottom: Restart game (from kick-off until End game and save) or Delete game (before kick-off); never both.
+        !finished && canRestartGame(game) ? h("div", { class: "gapbig" }, setCard(h("button", { class: "btn redtext", id: "restartGame", onclick: () => actions.askRestart("game") }, "Restart game"))) : null,
+        canDeleteGame(game) ? h("button", { class: "btn redtext gapbig", id: "deleteGame", onclick: () => actions.askDelete(game.id) }, "Delete game") : null
       ),
+      state.deleteId ? deleteSheet(state, actions) : null,
+      state.hereDraft ? hereDraftPicker(state, actions) : null,
+      restartAskSheet(state, actions),
     ],
   };
 }
@@ -979,10 +1033,9 @@ function pitchAndBench(view, state, canMove, crowded, live = false, benchZone = 
     "div",
     // Five or more rows need the smaller circles to fit.
     // GDA-48: a top row of 3 or more would run under the corner switch, so the rows start lower (padding only; the pitch keeps its height).
-    { class: (tight ? "pitch tight" : roomy ? "pitch roomy" : "pitch") + (overlay ? " pilled" : "") + (actions ? " cogged" : "") + (switchBtn && rows[0].length >= 3 ? " push" : ""), style: `grid-template-rows: repeat(${rows.length}, minmax(0, 1fr))` },
+    { class: (tight ? "pitch tight" : roomy ? "pitch roomy" : "pitch") + (overlay ? " pilled" : "") + (switchBtn && rows[0].length >= 3 ? " push" : ""), style: `grid-template-rows: repeat(${rows.length}, minmax(0, 1fr))` },
     ...rows.map(line),
     overlay, // GDA-125: the swap pill sits inside the pitch's bottom-right corner (live half only)
-    actions ? settingsButton(actions) : null, // GDA-120: Settings mirrors it in the bottom-left corner
     switchBtn // GDA-48: the Pitch / List switch, top right
   );
   if (live) {
@@ -1069,7 +1122,6 @@ function notStartedHalf(state, actions, half) {
       ...gameHead(state, actions, { label: half === 1 ? "1st Half" : "2nd Half", clock: "0:00", chip, tapScore: half === 2 && firstHalfRunning(game) }),
       planBody(game, view, state, actions, { editable, firstHalf: half === 1 }), // Absent / Back in is by drag only (Ben, 2026-11-15)
       bottomBar(state, actions), // empty unless there is an error message
-      gameDetailsSheet(state, game, actions),
       half === 2 && firstHalfRunning(game) ? goalDialog(state, game, actions) : null,
       noteSheet(state, game, actions), // GDA-109: the player profile (before kick-off: figures only)
       potdPicker(state, game, actions), // GDA-175: the 2nd half plan (1st half running, or half time) has the row too
@@ -1148,15 +1200,6 @@ function hereRow(state, game, actions) {
 /** GDA-121: the row that opens Interchange history (Game details sheet, and the bottom of the Summary page). */
 function interchangeRow(actions) {
   return h("button", { class: "setrow rowbtn", id: "interchangeRow", onclick: actions.openInterchange }, h("span", {}, "Interchange history"), h("span", { class: "ro" }, "\u203a"));
-}
-
-/** GDA-175: the Player of the day row in Game settings (kicked off, not yet saved): today's pick or "Not chosen"; opens the list. */
-function potdSettingsRow(state, game, actions) {
-  if (!canEditNotes(game)) {
-    return null;
-  }
-  const player = state.players.find((p) => p.id === potdOf(game));
-  return h("button", { class: "setrow rowbtn", id: "potdSettingsRow", onclick: actions.openPotdFromSettings }, h("span", {}, "Player of the day"), h("span", { class: "ro", id: "potdSettingsValue" }, player ? player.name : "Not chosen", " \u203a"));
 }
 
 /**
@@ -1241,24 +1284,44 @@ function venueEditor(game, actions) {
 }
 
 /**
- * Undo kick-off (GDA-98): in the Game details sheet only while the half shown is In progress and has a
- * saved copy from its kick-off. Not shown at all otherwise (not just greyed). The first tap asks;
- * "Keep playing" changes nothing; "Undo kick-off" undoes it.
+ * GDA-214: the sheet a long press on the chip or clock opens. 1st half: Restart half. 2nd half: Restart half and Restart game.
+ * Nothing is changed by opening or closing it; each choice asks first (restartAskSheet).
  */
-function undoKickOffRow(state, game, actions) {
-  if (!canUndoKickOff(game, screenHalf(state.screen))) {
+function restartMenuSheet(state, actions) {
+  if (!state.restartMenu) {
     return null;
-  }
-  if (!state.undoKickOffAsk) {
-    return h("button", { class: "btn redtext", id: "undoKickOff", onclick: actions.askUndoKickOff }, "Undo kick-off");
   }
   return h(
     "div",
-    { class: "card undoAsk", id: "undoKickOffAsk" },
-    h("b", {}, "Undo kick-off?"),
-    h("p", {}, "The clock goes back to 0:00 and this half's swaps and goals are removed."),
-    h("button", { class: "btn del", id: "confirmUndoKickOff", onclick: actions.confirmUndoKickOff }, "Undo kick-off"),
-    h("button", { class: "btn", id: "keepPlaying", onclick: actions.keepPlaying }, "Cancel")
+    { class: "scrim", id: "restartMenu" },
+    h(
+      "div",
+      { class: "sheet" },
+      h("h2", {}, "Restart"),
+      h("button", { class: "btn redtext", id: "restartHalf", onclick: () => actions.askRestart("half") }, "Restart half"),
+      screenHalf(state.screen) === 2 ? h("button", { class: "btn redtext", id: "restartGameFromSheet", onclick: () => actions.askRestart("game") }, "Restart game") : null,
+      h("button", { class: "btn", id: "closeRestartMenu", onclick: actions.closeRestartMenu }, "Cancel")
+    )
+  );
+}
+
+/** GDA-214: the confirm for Restart half or Restart game: one short line, a red confirm (ignores taps for 600 ms, GDA-207) and Cancel. */
+function restartAskSheet(state, actions) {
+  if (!state.restartAsk) {
+    return null;
+  }
+  const game = state.restartAsk === "game";
+  return h(
+    "div",
+    { class: "scrim", id: "restartAsk" },
+    h(
+      "div",
+      { class: "sheet" },
+      h("h2", {}, game ? "Restart game?" : "Restart half?"),
+      h("p", {}, game ? "Both halves go back to before kick-off. Goals, swaps and times are removed." : "This half goes back to 0:00. Its goals, swaps and times are removed."),
+      h("button", { class: "btn del", id: "confirmRestart", onclick: actions.confirmRestart }, game ? "Restart game" : "Restart half"),
+      h("button", { class: "btn", id: "cancelRestart", onclick: actions.cancelRestart }, "Cancel")
+    )
   );
 }
 
@@ -1292,25 +1355,17 @@ function carryValuesOf(game) {
 }
 
 /**
- * The Game details sheet (GDA-64, GDA-105), drawn only while open: the rotation length, Who is here,
- * the two Carry over switches, Undo kick-off and Done. Opposition, date, Home / Away and Field live on the New game screen. Each tap on - or + is saved at once;
- * Done only closes the sheet.
+ * The Game settings sheet (GDA-210): now only on a saved game's Full Time screen, opened from the cog, and holding one
+ * button, Archive game. Everything else moved to the game details page (newGameScreen). Drawn only while open; its
+ * confirm replaces it and Cancel brings it back.
  */
 function gameDetailsSheet(state, game, actions) {
   if (!state.rotationOpen) {
     return null;
   }
-  // GDA-185: Archive and Delete are asked from this sheet; their confirm replaces it, and Cancel brings it back.
   if (state.archiveId) {
     return archiveSheet(state, actions);
   }
-  if (state.deleteId) {
-    return deleteSheet(state, actions);
-  }
-  if (state.hereDraft) {
-    return hereDraftPicker(state, actions);
-  }
-  const undoRow = undoKickOffRow(state, game, actions);
   return h(
     "div",
     { class: "scrim", id: "rotSheet" },
@@ -1318,24 +1373,7 @@ function gameDetailsSheet(state, game, actions) {
       "div",
       { class: "sheet" },
       sheetHead("Game settings", actions.closeRotation, "rotX"),
-      setCard(
-        h("div", { class: "setrow" }, h("span", {}, "Rotation length"), rotationPicker(clampRotation(game.rotationMinutes ?? 6, halfOf(game)), snappedSeconds(game.rotationExtraSeconds, clampRotation(game.rotationMinutes ?? 6, halfOf(game)), halfOf(game)), halfOf(game), actions.setRotation)),
-        formationRow(game, actions),
-        hereRow(state, game, actions),
-        interchangeRow(actions),
-        potdSettingsRow(state, game, actions),
-        // GDA-177: only the row that matters now: the season chart before kick-off, the rotation counts from kick-off until saved.
-        game.state === NOT_STARTED ? displaySwitch("showSeasonChart", "Season chart on line-up", showsSeasonChart(game, currentTeamOf(state)), () => actions.setDisplayChoice("showSeasonChart")) : null,
-        canEditNotes(game) ? displaySwitch("showRotationCounts", "Rotation counts", showsRotationCounts(game, currentTeamOf(state)), () => actions.setDisplayChoice("showRotationCounts")) : null
-      ),
-      // GDA-86, GDA-105: on both half screens (editable until the 2nd half starts, read-only after).
-      carryOverSwitches(carryValuesOf(game), !canChangeCarryOver(game), actions),
-      // GDA-143: Done sits where Undo kick-off used to, Undo kick-off at the bottom.
-      h("button", { class: "btn pri", id: "rotDone", onclick: actions.closeRotation }, "Done"),
-      undoRow && !state.undoKickOffAsk ? setCard(undoRow) : undoRow,
-      // GDA-185: low-key red buttons at the bottom: Delete before kick-off, Archive on a finished game (never both).
-      canDeleteGame(game) ? h("button", { class: "btn redtext", id: "deleteGame", onclick: () => actions.askDelete(game.id) }, "Delete game") : null,
-      canArchiveGame(game) ? h("button", { class: "btn redtext", id: "archiveGame", onclick: () => actions.askArchive(game.id) }, "Archive game") : null
+      canArchiveGame(game) ? h("button", { class: "btn", id: "archiveGame", onclick: () => actions.askArchive(game.id) }, "Archive game") : null
     )
   );
 }
@@ -1372,6 +1410,55 @@ function currentTeamOf(state) {
 let currentLogos = {};
 export function setLogos(logos) {
   currentLogos = logos;
+}
+
+/** GDA-214: how long a press must last to count as a hold (a check accepts 500 to 800 ms). */
+const HOLD_MS = 600;
+
+/**
+ * GDA-214: a press held for HOLD_MS calls `onHold`; the tap that follows the hold is swallowed, so holding never starts or stops the clock.
+ * Letting go earlier is a normal tap. A finger that slides away cancels the hold. Text selection and the iOS callout are switched off in CSS (.holdable).
+ */
+function makeHoldable(element, onHold) {
+  let timer = null;
+  let held = false;
+  let start = null;
+  const cancel = () => {
+    clearTimeout(timer);
+    timer = null;
+  };
+  element.classList.add("holdable");
+  element.addEventListener("pointerdown", (event) => {
+    held = false;
+    start = { x: event.clientX, y: event.clientY };
+    cancel();
+    timer = setTimeout(() => {
+      timer = null;
+      held = true;
+      onHold();
+    }, HOLD_MS);
+  });
+  element.addEventListener("pointermove", (event) => {
+    if (timer && start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 10) {
+      cancel();
+    }
+  });
+  for (const name of ["pointerup", "pointercancel", "pointerleave"]) {
+    element.addEventListener(name, cancel);
+  }
+  element.addEventListener("contextmenu", (event) => event.preventDefault()); // Android's long-press menu
+  // Capture: runs before the element's own tap handler, so the tap after a hold does nothing.
+  element.addEventListener(
+    "click",
+    (event) => {
+      if (held) {
+        held = false;
+        event.stopImmediatePropagation();
+        event.preventDefault();
+      }
+    },
+    true
+  );
 }
 
 /**
@@ -1417,7 +1504,15 @@ function gameHead(state, actions, { label, clock, over = false, chip = null, nex
   const [back, next] = navArrows(state, actions, nextGo);
   const words = label.split(" ");
   const labelNode = h("h1", { class: "hl" }, words[0], " ", h("br"), words.slice(1).join(" ")); // the screen's heading, in two lines
-  const band = h("div", { class: over ? "clk bar hb over" : "clk bar hb" }, back, labelNode, h("div", { class: "ck" }, clockNode(clock, chip, over)), h("div", { class: "cs" }, chip), next);
+  const clockEl = clockNode(clock, chip, over);
+  if (chip?.holdAction) {
+    // GDA-214: a 600 ms hold on the chip or the clock (when the clock is a button) opens the Restart sheet instead of a tap.
+    makeHoldable(chip, chip.holdAction);
+    if (clockEl.tagName === "BUTTON") {
+      makeHoldable(clockEl, chip.holdAction);
+    }
+  }
+  const band = h("div", { class: over ? "clk bar hb over" : "clk bar hb" }, back, labelNode, h("div", { class: "ck" }, clockEl), h("div", { class: "cs" }, chip), next);
   const parts = [
     h("span", { class: "side l" }, teamLogo(usName, currentLogos[team?.id]), h("span", { class: "tn" }, usName)),
     h("span", { class: "mid" }, h("span", { class: "tg", id: "scoreUs" }, String(score.us)), h("span", { class: "dash", "aria-hidden": "true" }, "\u2013"), h("span", { class: "tg", id: "scoreThem" }, String(score.them))),
@@ -1444,27 +1539,31 @@ function runningHalf(state, actions, half) {
   const startedAt = half === 2 ? game.secondHalfStartedAt : game.firstHalfStartedAt;
   const endedAt = half === 2 ? game.secondHalfEndedAt : game.firstHalfEndedAt;
   const clock = clockText(startedAt, live ? Date.now() : endedAt, halfOf(game));
-  const atHalfTime = half === 1 && canResumeHalf(game, 1);
-  const label = atHalfTime ? "Half Time" : half === 2 ? "2nd Half" : "1st Half";
+  const label = half === 2 ? "2nd Half" : "1st Half";
   let chip = null; // nothing to stop or resume: the slot stays, empty
   if (live) {
     // Stop = End Half (no confirmation; Resume half at Half Time is the way back). drawClock makes it solid dark when time is up.
-    chip = headChip("endHalf", "End half", "stop", isTimeUp(startedAt, Date.now(), halfOf(game)), actions.endHalf);
+    chip = headChip("endHalf", "End half", "stop", true, actions.endHalf);
   } else if (canResumeHalf(game, half)) {
-    chip = headChip("resumeHalf", "Resume half", "undo", false, actions.resumeHalf);
+    chip = headChip("resumeHalf", "Resume half", "play", false, actions.resumeHalf);
+  }
+  // GDA-214: holding the chip or the clock opens Restart half / Restart game (only while those are offered).
+  if (chip && canUndoKickOff(game, half)) {
+    chip.holdAction = actions.openRestartMenu;
   }
   return {
     fixed: true,
     noMove: true,
     nodes: [
-      ...gameHead(state, actions, { label, clock, over: isTimeUp(startedAt, live ? Date.now() : endedAt, halfOf(game)), chip, nextGo: atHalfTime }),
+      ...gameHead(state, actions, { label, clock, over: isTimeUp(startedAt, live ? Date.now() : endedAt, halfOf(game)), chip, nextGo: !live }),
       // GDA-125: no strip. The swap pill lives on the pitch and only while the half is running.
       h("div", { class: "lu" }, ...gameBody(view, state, game, actions, live)),
       bottomBar(state, actions), // empty unless there is an error message
-      gameDetailsSheet(state, game, actions),
       goalDialog(state, game, actions),
       noteSheet(state, game, actions),
       potdPicker(state, game, actions), // GDA-175: opened from Game settings; the clock keeps running underneath
+      restartMenuSheet(state, actions),
+      restartAskSheet(state, actions),
     ],
     after: () => {
       drawClock(state);
@@ -1525,7 +1624,7 @@ function goalDialog(state, game, actions) {
     footer: h(
       "div",
       { class: "pfoot" },
-      h("button", { class: "btn grey undo2", id: "undoGoal", disabled: undoLine === null, onclick: actions.undoLastGoal }, "Undo last goal", undoLine ? h("small", { id: "undoLine" }, undoLine) : null)
+      h("button", { class: "btn undo2", id: "undoGoal", disabled: undoLine === null, onclick: actions.undoLastGoal }, "Undo last goal", undoLine ? h("small", { id: "undoLine" }, undoLine) : null)
     ),
   });
 }
@@ -1687,7 +1786,6 @@ export function drawClock(state) {
     const timeUp = isTimeUp(startedAtOf(game), now, halfOf(game));
     clock.closest(".clk")?.classList.toggle("over", timeUp); // marks time up; no look of its own (GDA-154: the pink head bar was removed)
     clock.classList.toggle("pulse", timeUp); // GDA-182: only the clock numbers pulse pink, and only while the half is running (drawClock runs only on a live half)
-    document.getElementById("endHalf")?.classList.toggle("go", timeUp); // time up: the Stop chip goes solid dark
     // GDA-150: the pill is drawn first and each part on its own, so a problem in one can never leave the pill without its time.
     try { drawSwapPill(game, state.players, now, timeUp); } catch (error) { console.error("swap pill", error); }
     try { drawBenchTimers(game, now); } catch (error) { console.error("bench timers", error); }
@@ -1785,7 +1883,7 @@ function fullTimeSheet(actions) {
       { class: "sheet" },
       h("h2", {}, "End the game?"),
       h("p", {}, "It can't be reopened."),
-      h("button", { class: "btn del", id: "confirmFullTime", onclick: actions.fullTime }, "End game and save"),
+      h("button", { class: "btn pri", id: "confirmFullTime", onclick: actions.fullTime }, "End game and save"),
       h("button", { class: "btn", id: "cancelFullTime", onclick: actions.cancelFullTime }, "Cancel")
     )
   );
@@ -1919,8 +2017,8 @@ function fullTimeScreen(state, actions) {
         state.justSaved ? h("p", { class: "hint", id: "gameSaved", role: "status" }, "Game saved") : null, // GDA-186: only straight after saving
         ...summaryBody(state, game, actions, { canChoose: open ? canEditNotes(game) : corrects, soFar: false, editGoals: corrects }),
         problemLine(state.problem),
-        // GDA-120: Settings sits bottom-left, End game and save takes the rest of the row.
-        h("div", { class: "endrow" }, settingsButton(actions), open ? h("button", { class: "btn pri big", id: "fullTime", onclick: actions.askFullTime }, "End game and save") : h("button", { class: "btn big", id: "closeGameBottom", onclick: actions.closeGame }, "Close game"))
+        // GDA-210: the cog (bottom-left) is only on a saved game, where its sheet holds Archive game alone.
+        h("div", { class: "endrow" }, canArchiveGame(game) ? settingsButton(actions) : null, open ? h("button", { class: "btn pri big", id: "fullTime", onclick: actions.askFullTime }, "End game and save") : h("button", { class: "btn", id: "closeGameBottom", onclick: actions.closeGame }, "Close game"))
       ),
       gameDetailsSheet(state, game, actions),
       state.fullTimeAsk ? fullTimeSheet(actions) : null,
@@ -2004,21 +2102,36 @@ function viewSwitch(state, actions) {
  * The box that takes the pitch's place in List view: a header line (caption on the left, the switch on the right), then a
  * scrolling area. Settings (and in a running game the swap pill) stay in their corners, so the screen's other parts do not move.
  */
-function listBox(state, actions, caption, content, pill = null) {
+function listBox(state, actions, caption, content, pill = null, tabs = null) {
+  // GDA-213: in a game the header holds the two tabs; the caption (the season's Halves / Minutes choice) then sits at the top of the scrolling area.
+  const head = tabs ? [tabs, viewSwitch(state, actions)] : [h("span", { class: "lvcap", id: "listCaption" }, ...[].concat(caption)), viewSwitch(state, actions)];
+  const top = tabs && caption ? [h("div", { class: "lvcap lvtop", id: "listCaption" }, ...[].concat(caption))] : [];
   return h(
     "div",
     { class: "listbox" + (pill ? " pilled" : "") },
-    h("div", { class: "lvhead" }, h("span", { class: "lvcap", id: "listCaption" }, ...[].concat(caption)), viewSwitch(state, actions)),
-    h("div", { class: "lvscroll", id: "listScroll" }, ...[].concat(content)),
-    pill,
-    settingsButton(actions)
+    h("div", { class: "lvhead" }, ...head),
+    h("div", { class: "lvscroll", id: "listScroll" }, ...top, ...[].concat(content)),
+    pill
   );
 }
 
+/** GDA-213: the Today / Season tabs in a game's List view (the Results / Players tab look). Opens on Interchange history. */
+function listTabs(state, actions) {
+  const onSeason = state.listTab === "season";
+  const tab = (id, which, text) =>
+    h("button", { type: "button", class: "htab", id, role: "tab", "aria-selected": String(onSeason === (which === "season")), onclick: () => actions.setListTab(which) }, text);
+  return h("div", { class: "htabs", role: "tablist" }, tab("tabGame", "game", LIST_TAB_LABELS.game), tab("tabSeason", "season", LIST_TAB_LABELS.season));
+}
+const LIST_TAB_LABELS = { game: "Today", season: "Season" };
+
 /** List view in a running game: the existing Interchange history (GDA-121) in the pitch's place. */
 function historyList(state, game, actions, pill) {
+  const tabs = listTabs(state, actions);
+  if (state.listTab === "season") {
+    return seasonList(state, game, actions, { tabs, pill }); // GDA-213: the same list the 1st half's line-up shows
+  }
   const [table, list] = tallyAndSwaps(state, game, actions);
-  return listBox(state, actions, "Interchange history", [table, h("div", { class: "lvsub" }, "Swaps"), list], pill);
+  return listBox(state, actions, null, [table, h("div", { class: "lvsub" }, "Swaps"), list], pill, tabs);
 }
 
 const AREA_HEADINGS = { name: "Name", Goal: "Keeper", Defence: "Defence", Midfield: "Midfield", Attack: "Attack" };
@@ -2027,19 +2140,18 @@ const AREA_HEADINGS = { name: "Name", Goal: "Keeper", Defence: "Defence", Midfie
  * List view before kick-off (GDA-48): every player with the share of halves they played in each area (GDA-173 works the
  * numbers out), A to Z until a heading is tapped. A dash and an empty bar for no halves played; nobody coloured or ranked.
  */
-function seasonList(state, game, actions) {
+function seasonList(state, game, actions, { tabs = null, pill = null } = {}) {
   const totals = seasonTotals({ games: state.games, players: state.players, eventsByGame: state.seasonEvents ?? {} });
   const sort = state.seasonSort;
   const mode = state.seasonMode === "minutes" ? "minutes" : "halves"; // GDA-176: opens on Halves
   const { here, absent } = listRows(state.players, totals.players, game.absent ?? [], sort, mode);
-  // The phone's own select (GDA-176) names the measure; the "based on" text follows it.
+  // The phone's own select (GDA-176) names the measure; 
   const option = (value) => h("option", { value, selected: value === mode }, listMeasure(value));
   const caption = [
     h("select", { class: "lmode", id: "seasonMode", "aria-label": "Measure", onchange: (e) => actions.setSeasonMode(e.target.value) }, option("halves"), option("minutes")),
-    totals.gamesCounted === 0 ? null : h("span", { id: "listBasedOn" }, ` \u00b7 ${listBasedOn(totals.gamesCounted, mode, totals.gamesWithMinutes)}`),
   ];
   if (totals.gamesCounted === 0) {
-    return listBox(state, actions, caption, h("div", { class: "empty", id: "noSeason" }, "No saved games yet.", h("br"), "This fills in when a game is saved at Full Time."));
+    return listBox(state, actions, caption, h("div", { class: "empty", id: "noSeason" }, "No saved games yet.", h("br"), "This fills in when a game is saved at Full Time."), pill, tabs);
   }
   const heading = (column) => {
     const sorted = sort.column === column;
@@ -2059,7 +2171,7 @@ function seasonList(state, game, actions) {
     h("tbody", {}, ...here.map(row)),
     absent.length > 0 ? h("tbody", {}, h("tr", { class: "sep" }, h("td", { colspan: "5" }, "ABSENT")), ...absent.map(row)) : null
   );
-  return listBox(state, actions, caption, table);
+  return listBox(state, actions, caption, table, pill, tabs);
 }
 
 /** GDA-121: while the game runs the tally keeps counting: the bench time cells change their text only, nothing is redrawn or re-sorted. */
@@ -2116,7 +2228,7 @@ function potdPicker(state, game, actions) {
     h(
       "div",
       { class: "sheet profile potd" },
-      h("div", { class: "phd" }, h("h2", {}, "Player of the day"), h("button", { class: "arrow", id: "potdClose", "aria-label": "Close", onclick: actions.closePotdPicker }, icon("close"))),
+      h("div", { class: "phd" }, h("h2", {}, "Player of the day"), h("button", { class: "pkx", id: "potdClose", "aria-label": "Close", onclick: actions.closePotdPicker }, "\u00d7")),
       potdHeadings(state, actions),
       h("div", { class: "psb potdlist", id: "potdList" }, ...rows)
     )
@@ -2179,7 +2291,7 @@ function noteSheet(state, game, actions) {
   const inGame = Boolean(game) && canCorrect(game); // GDA-187: opened from Season history there is no game, so figures only
   const done = h("button", { class: "btn pri big", id: "noteDone", onclick: actions.closeNote }, "Done");
   // GDA-109: three more ways to close, all saving exactly as Done does: this X, a tap on the grey background, a swipe down (main.js).
-  const head = h("div", { class: "phd" }, avatar(player), h("h2", {}, player.name), h("button", { class: "arrow", id: "noteClose", "aria-label": "Close", onclick: actions.closeNote }, icon("close")));
+  const head = h("div", { class: "phd" }, avatar(player), h("h2", {}, player.name), h("button", { class: "pkx", id: "noteClose", "aria-label": "Close", onclick: actions.closeNote }, "\u00d7"));
   const onScrim = (event) => {
     if (event.target === event.currentTarget) {
       actions.closeNote(); // only the grey background itself, never the sheet

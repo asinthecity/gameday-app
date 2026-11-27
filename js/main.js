@@ -51,8 +51,9 @@ import {
   withVenue,
   hereDifferences,
   withDetails,
+  canUndoKickOff,
 } from "./game-rules.js";
-import { loadSeasonEvents, loadGameEvents, archiveGame, deleteGame, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlan, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, reorderPlanBench, startFirstHalf, startSecondHalf, undoKickOff, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
+import { loadSeasonEvents, loadGameEvents, archiveGame, deleteGame, addGame, addGoal, removeGoal, changeGame, endHalf, fullTime, loadGames, moveFieldPlayer, movePlan, movePlayer, planPair, prePlaceGame, reopenHalf, reorderBench, reorderPlanBench, startFirstHalf, startSecondHalf, undoKickOff, restartGame, swapPlayers, toggleHere, undoSwap, unplanPair } from "./game-store.js";
 import { exportCsv, exportFileName, exportRows, EXPORT_FAILED, NOTHING_TO_EXPORT } from "./export-rules.js";
 import { shareFile } from "./share-file.js";
 import { backupFileName, BACKUP_FAILED, makeBackup, parseBackup, RESTORE_BUSY, RESTORE_FAILED } from "./backup-rules.js";
@@ -64,8 +65,8 @@ import { loadPhotos, removePhoto, savePhoto } from "./photo-store.js";
 import { loadLogos, removeLogo, saveLogo } from "./logo-store.js";
 import { cleanName } from "./squad-rules.js";
 import { addPlayer, loadSquad, removePlayer, renamePlayer } from "./squad-store.js";
-import { addTeam, deleteTeam, loadTeams, removeOldSheetSetting, switchTeam, updateTeam } from "./team-store.js";
-import { rememberFirstTeamId, canSwitchTeams, cleanTeamForm, deleteRefusal, firstTeamIdOf, newGameFormFor, teamFormValues, teamValuesToSave } from "./team-rules.js";
+import { addTeam, archiveTeam, bringBackTeam, deleteTeam, loadTeams, removeOldSheetSetting, switchTeam, updateTeam } from "./team-store.js";
+import { rememberFirstTeamId, canSwitchTeams, cleanTeamForm, deleteRefusal, newGameFormFor, teamFormValues, teamValuesToSave } from "./team-rules.js";
 import { applyUpdate, currentUpdateNotice, startUpdates } from "./updates.js";
 
 const SAVE_PROBLEM = "That did not save. Please try again.";
@@ -96,7 +97,8 @@ const state = {
   addCameFrom: "home",
   showRemoveWarning: false,
   hereDraft: null, // GDA-43: the Who is here picker's unsaved draft (a Set of player ids), or null when closed.
-  undoKickOffAsk: false, // Undo kick-off confirm showing in the Game details sheet.
+  restartMenu: false, // GDA-214: the long-press sheet (Restart half / Restart game) is open.
+  restartAsk: null, // GDA-214: "half" or "game" while that restart's confirm shows.
   rotationOpen: false, // The rotation stepper sheet on the ready and game screens.
   goalOpen: false, // The "Who scored?" dialog (GDA-90).
   goalFixId: null, // GDA-94: the goal whose change/remove pop-up is open (from the Summary). Never saved.
@@ -104,6 +106,7 @@ const state = {
   interchange: null, // GDA-121: { events } read when Interchange history opens. Never saved.
   interchangeBack: null, // The screen Interchange history returns to. Never saved.
   tallySort: { column: "name", descending: false }, // The bench time table's sort. Not remembered.
+  listTab: "game", // GDA-213: the tab of a game's List view ("game" = Interchange history, "season" = Season positions). Never saved; opens on "game".
   listView: false, // GDA-48: the line-up / game shows the List instead of the Pitch. Never saved; every screen opens on the Pitch.
   seasonMode: "halves", // GDA-176/109: halves or minutes, one choice shared by the season List and the player profile; remembered on the phone (meta "seasonMode"), halves the first time
   seasonEvents: {}, // GDA-176: saved events by game, read when the List opens (for minutes)
@@ -118,7 +121,10 @@ const state = {
   undo: null, // After Swap, for about 5 seconds: { before, eventId, until }. Never saved.
   problem: "",
   justSaved: false, // GDA-186: true only on Full Time straight after End game and save; shows the "Game saved" line.
-  teams: [], // Every team, oldest first (GDA-68).
+  teams: [], // The teams in the team list, oldest first (GDA-68). Archived teams are not here (GDA-208).
+  archivedTeams: [], // GDA-208: teams hidden from the list, everything kept.
+  archiveTeamOpen: false, // The "Archive team?" confirm. Never saved.
+  archivedListOpen: false, // The Archived teams list inside the team drop-down. Never saved.
   currentTeamId: null, // The team Home and Squad show.
   firstTeamId: null, // What a record with no team ID belongs to.
   teamForm: null, // The Add / Team settings form: { mode, values, errors }. Never saved until Save.
@@ -145,10 +151,11 @@ function currentTeam() {
 
 /** Reads teams, then the current team's squad and games. */
 async function loadEverything() {
-  const { teams, currentTeamId } = await loadTeams(db);
+  const { teams, archivedTeams, currentTeamId, firstTeamId } = await loadTeams(db);
   state.teams = teams;
+  state.archivedTeams = archivedTeams;
   state.currentTeamId = currentTeamId;
-  state.firstTeamId = firstTeamIdOf(teams);
+  state.firstTeamId = firstTeamId; // GDA-208: from ALL teams, archived included
   rememberFirstTeamId(state.firstTeamId);
   state.players = await squadNow();
   state.photos = await loadPhotos(db);
@@ -218,6 +225,7 @@ function draw() {
 function goTo(screen) {
   state.screen = screen;
   state.listView = false; // GDA-48: a screen always opens on the Pitch
+  state.listTab = "game";
   if (screen === "home") {
     state.viewId = null; // Leaving a finished game's view.
     state.historyTab = "results"; // GDA-185: Home opens on Results every time (the tab is not remembered)
@@ -226,7 +234,8 @@ function goTo(screen) {
   state.problem = "";
   state.showRemoveWarning = false;
   state.rotationOpen = false;
-  state.undoKickOffAsk = false;
+  state.restartMenu = false;
+  state.restartAsk = null;
   state.hereDraft = null;
   state.undo = null;
   state.goalOpen = false;
@@ -245,6 +254,8 @@ function goTo(screen) {
   state.archiveId = null;
   state.fullTimeAsk = false;
   state.deleteTeamOpen = false;
+  state.archiveTeamOpen = false;
+  state.archivedListOpen = false;
   ignoreTapsUntil = Date.now() + TAP_PAUSE_MS;
   draw();
   window.scrollTo(0, 0);
@@ -810,25 +821,42 @@ const actions = {
     changeGame(db, game.id, (g) => (formationRowHalf(g) !== null ? withFormation(g, formation) : g))
       .catch((error) => console.warn("Could not save the formation", error));
   },
-  // GDA-98: Undo kick-off asks first; Keep playing changes nothing.
-  askUndoKickOff: tap(() => {
-    state.undoKickOffAsk = true;
+  // GDA-214: Restart half / Restart game (replace Undo kick-off). A 600 ms hold on the chip or clock opens the menu; each choice asks first.
+  openRestartMenu: tap(() => {
+    const game = openGame();
+    if (game && canUndoKickOff(game, screenHalf(state.screen))) {
+      state.restartMenu = true;
+      draw();
+    }
+  }),
+  closeRestartMenu: tap(() => {
+    state.restartMenu = false;
+    draw();
+  }),
+  askRestart: tap((which) => {
+    state.restartMenu = false;
+    state.restartAsk = which;
     pauseForConfirm();
     draw();
   }),
-  keepPlaying: tap(() => {
-    state.undoKickOffAsk = false;
+  cancelRestart: tap(() => {
+    state.restartAsk = null;
     draw();
   }),
-  confirmUndoKickOff: tap(async () => {
-    const half = screenHalf(state.screen);
-    state.undoKickOffAsk = false;
-    // Saved first (all or nothing); a screen that is out of date changes nothing. Then the screen the saved game opens on.
-    await saveThenGoTo(() => undoKickOff(db, state.gameId, half), state.screen);
+  confirmRestart: tap(async () => {
+    const which = state.restartAsk;
+    state.restartAsk = null;
+    if (which === "game") {
+      // Both halves, back to before 1st-half kick-off; the game then opens on the 1st Half, not started.
+      await saveThenGoTo(() => restartGame(db, state.gameId), "half1");
+    } else if (which === "half") {
+      // The half the screen shows. The save checks the saved game still agrees, so an out-of-date screen changes nothing.
+      const half = screenHalf(state.screen);
+      await saveThenGoTo(() => undoKickOff(db, state.gameId, half), half === 2 ? "half2" : "half1");
+    }
   }),
   closeRotation: tap(() => {
     state.rotationOpen = false;
-    state.undoKickOffAsk = false;
     state.hereDraft = null;
     draw();
   }),
@@ -964,6 +992,7 @@ const actions = {
       draw();
       return;
     }
+    state.listTab = "game"; // GDA-213: List view always opens on Interchange history
     const game = openGame();
     try {
       if (game && typeof game.firstHalfStartedAt === "number") {
@@ -977,6 +1006,20 @@ const actions = {
     } catch (error) {
       console.warn("Could not open the list", error);
       state.problem = "Could not open the list. Try again.";
+    }
+    draw();
+  }),
+  // GDA-213: the tabs of a game's List view. Season positions needs the season's saved events (for Minutes), read when it is first opened.
+  setListTab: tap(async (which) => {
+    state.listTab = which === "season" ? "season" : "game";
+    if (state.listTab === "season") {
+      state.seasonSort = state.seasonSort ?? { column: "name", descending: false };
+      try {
+        state.seasonEvents = await loadSeasonEvents(db);
+      } catch (error) {
+        console.warn("Could not read the season's events", error);
+        state.seasonEvents = {}; // halves still show; minutes show dashes
+      }
     }
     draw();
   }),
@@ -1028,13 +1071,6 @@ const actions = {
   },
   openPotdPicker: tap(() => {
     state.potdSort = { column: "count", descending: false };
-    state.potdOpen = true;
-    draw();
-  }),
-  // GDA-175: from Game settings; the settings sheet closes so a pick returns straight to the game.
-  openPotdFromSettings: tap(() => {
-    state.potdSort = { column: "count", descending: false };
-    state.rotationOpen = false;
     state.potdOpen = true;
     draw();
   }),
@@ -1215,6 +1251,37 @@ const actions = {
   cancelDeleteTeam: tap(() => {
     state.deleteTeamOpen = false;
     draw();
+  }),
+  askArchiveTeam: tap(() => {
+    state.archiveTeamOpen = true;
+    pauseForConfirm();
+    draw();
+  }),
+  cancelArchiveTeam: tap(() => {
+    state.archiveTeamOpen = false;
+    draw();
+  }),
+  confirmArchiveTeam: tap(() => {
+    if (deleteRefusal(state.teams, state.games)) {
+      return;
+    }
+    state.archiveTeamOpen = false;
+    saveTeamThenHome(() => archiveTeam(db, state.currentTeamId));
+  }),
+  // The Archived teams list under "+ Add team": opens and closes; a team in it is brought back with one tap (no confirm).
+  openArchivedTeams: tap(() => {
+    if (!canSwitchTeams(state.games)) {
+      return;
+    }
+    state.archivedListOpen = !state.archivedListOpen;
+    draw();
+  }),
+  bringBackTeam: tap((id) => {
+    if (!canSwitchTeams(state.games)) {
+      return;
+    }
+    state.archivedListOpen = false;
+    saveTeamThenHome(() => bringBackTeam(db, id));
   }),
   confirmDeleteTeam: tap(() => {
     if (deleteRefusal(state.teams, state.games)) {
